@@ -3,29 +3,33 @@ from morl_baselines.common.morl_algorithm import MOPolicy
 import utils
 
 class MOPolicyIteration(MOPolicy):
-    def __init__(self, id, env, weights, gamma, max_iters_train, **kwargs):
+    def __init__(self, id, env, weights, V_init=None, gamma=0.7, scalarization='linear', ref_point=None, **kwargs):
         super().__init__(id)
         self.weights = weights
         self.gamma = gamma
-        self.max_iters_train = max_iters_train
+        self.scalarization = scalarization
+        self.ref_point = ref_point
 
-        self.env = env # Access matrices directly
+        self.env = env
         self.nS = self.env.nS
         self.nS_user = self.env.nS_user
-        self.nS_count = env.nS_count
+        self.nS_count = self.env.nS_count
         self.nA = self.env.nA
         self.nO = self.env.nO
 
-        self.P_user = self.env.P_user
-        self.P_comp = self.env.P_comp
-        self.P_user_all = self.P_user.transpose(1, 0, 2) 
-        self.R = self.env.R
-        self.next_indices = self.env.next_indices
+        self.P_user = self.env.P_user  # shape (n_u, nA, n_u)
+        self.P_user_all = self.P_user.transpose(1, 0, 2)  # reindex to (nA, n_u, n_u) 
+        self.P_comp = self.env.P_comp  # completion probabilities, shape (nU, nA)
+        self.R = self.env.R  # reward function, shape (nU, nC, nA, nO)
+        self.next_indices = self.env.next_indices  
         
-        self.policy_table = np.zeros(self.nS, dtype=np.int8)
-        self.v_matrix = np.zeros((self.nS_user, self.nS_count))  
+        self.policy_table = np.zeros(self.nS, dtype=np.int8)  # Policy mapping each state to an action
+        self.V_scalarized = np.zeros((self.nS_user, self.nS_count))  # Value function for all states, scalarized with current weights
         self.expected_return = np.zeros(self.nO)  # Vector of expected returns for the start state
-        self.V_full = np.zeros((self.nS_user, self.nS_count, self.nO))  # Full V-table for all states and objectives
+        if V_init is not None:
+            self.V_full = V_init
+        else:
+            self.V_full = np.zeros((self.nS_user, self.nS_count, self.nO))  # Full value function for all states and objectives
 
     def eval(self, obs, w=None):
         """
@@ -33,7 +37,7 @@ class MOPolicyIteration(MOPolicy):
         We use w=None as a default to keep it flexible.
         """
         if isinstance(obs, np.ndarray):
-            state_idx = utils.state_to_idx(obs, max_count=self.env.MAX_COUNT)  
+            state_idx = utils.state_to_idx(obs, num_feats=3, num_counts=self.env.num_clusters, num_vals=3, max_count=self.env.MAX_COUNT)  
         else:
             state_idx = obs
             
@@ -42,21 +46,21 @@ class MOPolicyIteration(MOPolicy):
     def update(self):
         self.train()
 
-    def set_weights(self, weights: np.ndarray):
+    def set_weights(self, weights: np.ndarray, max_eval_iters=10):
         self.weights = weights
-        # Re-solve the MDP with the new weight profile instantly
-        self.train()
+        self.train(max_eval_iters=max_eval_iters)
         print(f"Updated weights to {weights}, re-computed policy.")
 
-    def compute_transitions(self, V_full):
+    def compute_next_state_values(self, V_full):
         """
-        Computes next-state values for ALL actions.
+        Computes next-state values for all actions given the current value function.
         Returns:
-            V_next_stay: (nA, n_u, n_c, nO)
-            V_next_increment: (nA, n_u, n_c, nO)
+            V_next_stay: (nA, n_u, n_c, nO) - values if count state stays the same
+            V_next_increment: (nA, n_u, n_c, nO) - values if count state increments according to next_indices, i.e. if the action is completed
         """
         V_next_stay = np.einsum('auj,jco->auco', self.P_user_all, V_full)
-
+        
+        # For the increment case, we need to reindex according to next_indices for each action category
         V_next_increment = np.stack([
             V_next_stay[a][:, self.next_indices[self.env.action_categories[a]]]
             for a in range(self.nA)
@@ -72,33 +76,29 @@ class MOPolicyIteration(MOPolicy):
         """
         n_u, n_c = self.nS_user, self.nS_count
 
-        R       = self.R.reshape(n_u, n_c, self.nA, self.nO)
-        P_comp  = self.P_comp.reshape(n_u, n_c, self.nA)
-        pi_2d   = self.policy_table.reshape(n_u, n_c)
+        pi_2d = self.policy_table.reshape(n_u, n_c)  # (n_u, n_c) - action at each state
 
         # Gather per-state quantities using the policy — no u,c loops
-        idx_u = np.arange(n_u)[:, None]              # (n_u, 1)
-        idx_c = np.arange(n_c)[None, :]              # (1, n_c)
+        idx_u = np.arange(n_u)[:, np.newaxis]             # (n_u, 1)
+        idx_c = np.arange(n_c)[np.newaxis, :]             # (1, n_c)
 
-        R_pi      = R[idx_u, idx_c, pi_2d]           # (n_u, n_c, nO)
-        P_comp_pi = P_comp[idx_u, idx_c, pi_2d]      # (n_u, n_c)
-        p_c       = P_comp_pi[:, :, np.newaxis]       # (n_u, n_c, 1)
+        R_pi = self.R[idx_u, idx_c, pi_2d]           # (n_u, n_c, nO) - rewards for the action chosen by the policy at each state
+        P_comp_pi = self.P_comp[idx_u, pi_2d]          # (nU, nC) - completion probabilities for the action chosen by the policy at each state
+        p_c = P_comp_pi[:, :, np.newaxis]         # (n_u, n_c, 1) - reshape for broadcasting over objectives
 
-        V_new = self.V_full.copy()
+        V_new = self.V_full.copy()  # warm start with current value function
 
         for _ in range(max_iterations):
             V_old = V_new.copy()
 
-            # Precompute transitions for all actions using current V
-            # V_next_stay, V_next_increment: (nA, n_u, n_c, nO)
-            P_user_all = self.P_user.transpose(1, 0, 2)           # (nA, n_u, n_u)
-            V_next_stay, V_next_increment = self.compute_transitions(V_old)
+            # Compute next-state values for all actions simultaneously
+            V_next_stay, V_next_increment = self.compute_next_state_values(V_old)
 
-            # Select the transitions for the action chosen by the policy at each state
-            # pi_2d[u,c] indexes into the action dimension
+            # Select the values for the action chosen by the policy at each state
             V_stay_pi = V_next_stay[pi_2d, idx_u, idx_c]         # (n_u, n_c, nO)
-            V_inc_pi  = V_next_increment[pi_2d, idx_u, idx_c]    # (n_u, n_c, nO)
+            V_inc_pi = V_next_increment[pi_2d, idx_u, idx_c]    # (n_u, n_c, nO)
 
+            # Bellman update for all states at once
             V_new = R_pi + self.gamma * ((1 - p_c) * V_stay_pi + p_c * V_inc_pi)
 
             if np.max(np.abs(V_new - V_old)) < theta:
@@ -114,46 +114,77 @@ class MOPolicyIteration(MOPolicy):
         """
         n_u, n_c = self.nS_user, self.nS_count
 
-        R      = self.R.reshape(n_u, n_c, self.nA, self.nO)
-        P_comp = self.P_comp.reshape(n_u, n_c, self.nA)
+        P_comp = self.P_comp[:, np.newaxis, :]  # (nU, 1, nA) for broadcasting
 
         # Transitions for all actions: (nA, n_u, n_c, nO)
-        P_user_all = self.P_user.transpose(1, 0, 2)               # (nA, n_u, n_u)
-        V_next_stay, V_next_increment = self.compute_transitions(self.V_full)
+        V_next_stay, V_next_increment = self.compute_next_state_values(self.V_full)
 
         # Rearrange to (n_u, n_c, nA, nO) for broadcasting with R and P_comp
-        V_next_stay      = V_next_stay.transpose(1, 2, 0, 3)      # (n_u, n_c, nA, nO)
-        V_next_increment = V_next_increment.transpose(1, 2, 0, 3) # (n_u, n_c, nA, nO)
+        V_next_stay = V_next_stay.transpose(1, 2, 0, 3)  # (n_u, n_c, nA, nO)
+        V_next_increment = V_next_increment.transpose(1, 2, 0, 3)  # (n_u, n_c, nA, nO)
 
-        p_c = P_comp[:, :, :, np.newaxis]                         # (n_u, n_c, nA, 1)
+        p_c = P_comp[:, :, :, np.newaxis]  # (n_u, n_c, nA, 1)
 
         # Q-values for all actions at once
-        Q = R + self.gamma * ((1 - p_c) * V_next_stay + p_c * V_next_increment)
-                                                                # (n_u, n_c, nA, nO)
+        Q = self.R + self.gamma * ((1 - p_c) * V_next_stay + p_c * V_next_increment)  # (n_u, n_c, nA, nO)
 
         # Scalarise and take greedy action
-        Q_scalar = Q @ self.weights                                # (n_u, n_c, nA)
-        new_pi   = np.argmax(Q_scalar, axis=-1).astype(np.int8)   # (n_u, n_c)
+        if self.scalarization == 'chebyshev' and self.ref_point is not None:
+            # use chebyshev scalarization with reference point
+            Q_scalar = np.max(self.weights * np.abs(Q - self.ref_point), axis=-1)  # (n_u, n_c, nA)
+        else:
+            Q_scalar = Q @ self.weights  # (n_u, n_c, nA)
 
-        policy_stable = np.array_equal(new_pi, self.policy_table.reshape(n_u, n_c))
+        # Greedy action with random tie-breaking
+        # max_q = np.max(Q_scalar, axis=-1, keepdims=True)
+        # ties = (Q_scalar == max_q)
+        # random_values = np.random.random(Q_scalar.shape) * ties * 1e-10  # Add small random noise to break ties randomly
+        # new_pi = np.argmax(Q_scalar + random_values, axis=-1).astype(np.int8)
+        # new_pi = np.argmax(Q_scalar, axis=-1).astype(np.int8)  # (n_u, n_c)
+
+        # policy_stable = np.array_equal(new_pi, self.policy_table.reshape(n_u, n_c))
+        # self.policy_table = new_pi.flatten()
+        
+        max_q = np.max(Q_scalar, axis=-1, keepdims=True)
+        ties = (Q_scalar == max_q)
+        random_values = np.random.random(Q_scalar.shape) * ties
+        new_pi = np.argmax(Q_scalar + random_values, axis=-1).astype(np.int8)
+
+        u_idx = np.arange(n_u)[:, None]  # (n_u, 1)
+        c_idx = np.arange(n_c)[None, :]  # (1, n_c)
+
+        old_q = Q_scalar[u_idx, c_idx, self.policy_table.reshape(n_u, n_c)]
+        new_q = Q_scalar[u_idx, c_idx, new_pi]
+        policy_stable = np.all(np.abs(new_q - old_q) < 1e-6)
         self.policy_table = new_pi.flatten()
         return policy_stable
 
 
-    def policy_iteration(self, max_iterations=100):
+    def policy_iteration(self, max_iterations=100, max_eval_iters=10, theta=1e-4):
         for i in range(max_iterations):
-            self.V_full = self.policy_evaluation(max_iterations=self.max_iters_train)  # Fewer iterations for faster convergence
+            old_V = self.V_full.copy()
+            self.V_full = self.policy_evaluation(max_iterations=max_eval_iters)  # Fewer iterations for faster convergence
             stable = self.policy_improvement()
+            # stable = np.max(np.abs(old_V - self.V_full)) < theta
             if stable:
                 print(f"Policy converged after {i + 1} iterations.")
                 break
-
-        self.v_matrix        = self.V_full @ self.weights
+        if self.scalarization == 'chebyshev' and self.ref_point is not None:
+            self.V_scalarized = np.max(self.weights * np.abs(self.V_full - self.ref_point), axis=-1)
+        else:
+            self.V_scalarized = self.V_full @ self.weights
         self.expected_return = self.V_full[0, 0]
 
 
-    def train(self, total_timesteps=0):
+    def train(self, max_iterations=100, max_eval_iters=10, theta=1e-4):
         print("Running policy iteration with weights:", self.weights)
-        self.policy_iteration()
+        self.policy_iteration(max_iterations=max_iterations, max_eval_iters=max_eval_iters, theta=theta)
 
+    def evaluate(self, max_eval_iters=1000):
+        self.V_full = self.policy_evaluation(max_iterations=max_eval_iters)
+        if self.scalarization == 'chebyshev' and self.ref_point is not None:
+            self.V_scalarized = np.max(self.weights * np.abs(self.V_full - self.ref_point), axis=-1)
+        else:
+            self.V_scalarized = self.V_full @ self.weights
+        self.expected_return = self.V_full[0, 0]  # TODO: look at initial distribution instead of just (0,0) -> use weighted average of V_full according to initial state distribution?
     

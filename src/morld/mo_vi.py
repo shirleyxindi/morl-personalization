@@ -15,8 +15,9 @@ class MOValueIteration(MOPolicy):
         self.nA = self.env.nA
         self.nO = self.env.nO
 
-        self.P_user = self.env.P_user
+        self.P_user = self.env.P_user  # shape (n_u, n_A, n_u)
         self.P_comp = self.env.P_comp
+        self.P_user_all = self.P_user.transpose(1, 0, 2)  # shape (n_A, n_u, n_u) 
         self.R = self.env.R
         self.next_indices = self.env.next_indices
         
@@ -26,11 +27,10 @@ class MOValueIteration(MOPolicy):
         self.expected_return = np.zeros(self.nO)  # Vector of expected returns for the start state
         self.V_full = np.zeros((self.nS_user, self.nS_count, self.nO))  # Full V-table for all states and objectives
 
-    def train(self, total_timesteps=0):
-        """In MORL/D, this is called during the improvement step."""
+    def train(self, max_eval_iters=10):
         print("Running value iteration with current weights...", self.weights)
         self.v_matrix, self.policy_table = self.value_iteration_factored()
-        self.V_full = self.policy_evaluation()
+        self.V_full = self.policy_evaluation(max_iterations=max_eval_iters)
         self.expected_return = self.V_full[0, 0]  # Assuming start state is (User 0, Count 0)
 
     def eval(self, obs, w=None):
@@ -54,105 +54,96 @@ class MOValueIteration(MOPolicy):
         self.train()
         print(f"Updated weights to {weights}, re-computed policy.")
 
-    def value_iteration_factored(self, gamma=0.9, theta=1e-6, max_iterations=1000):
-        n_u = self.nS_user
-        n_c = self.nS_count
-        V = self.v_matrix.copy()  # Shape (n_u, n_c)
-        
-        # Pre-calculate scalarized rewards R[u, c, a]
-        R = (self.R * self.weights).sum(axis=2).reshape(n_u, n_c, self.nA)
-        
-        # Pre-extract completion probabilities p_c[u, c, a]
-        # (Assuming the last objective is completion probability)
+    def compute_transitions(self, V_full):
+        """
+        Computes next-state values for ALL actions.
+        Returns:
+            V_next_stay: (nA, n_u, n_c, nO) - values if count state stays the same
+            V_next_increment: (nA, n_u, n_c, nO) - values if count state increments according to next_indices, i.e. if the action is completed
+        """
+        V_next_stay = np.einsum('auj,jco->auco', self.P_user_all, V_full)
+
+        V_next_increment = np.stack([
+            V_next_stay[a][:, self.next_indices[self.env.action_categories[a]]]
+            for a in range(self.nA)
+        ])
+
+        return V_next_stay, V_next_increment
+
+    def value_iteration_factored(self, theta=1e-6, max_iterations=1000):
+        n_u, n_c = self.nS_user, self.nS_count
+
+        V = self.v_matrix.copy()  # (n_u, n_c)
+
+        # Scalarized rewards: (n_u, n_c, nA)
+        R = (self.R * self.weights).sum(axis=-1).reshape(n_u, n_c, self.nA)
+
+        # Completion probabilities: (n_u, n_c, nA, 1) for broadcasting
         P_comp = self.P_comp.reshape(n_u, n_c, self.nA)
 
-        Q = np.zeros((self.nA, n_u, n_c))
-        
         for _ in range(max_iterations):
             V_old = V.copy()
-            
-            for a in range(self.nA):
-                # User state transition 
-                # P_user_a is (n_u, n_u)
-                P_user_a = self.P_user[:, a, :] 
-                
-                # Count state transition 
-                # Probability of staying vs probability of incrementing
-                p_c = P_comp[:, :, a] # Shape (n_u, n_c)
 
-                k = self.env.action_categories[a]  # Category of the current action
-                next_indices_k = self.next_indices[k]  # Shape (n_c,)
-                
-                # We calculate the expected future value for all user and count states at once
-                # Values for staying in same count state
-                V_next_stay = P_user_a @ V_old 
-                # Values for incrementing count state
-                V_next_increment = V_next_stay[:, next_indices_k]
-                
-                # Combine based on completion probability
-                Q[a] = R[:, :, a] + gamma * ((1 - p_c) * V_next_stay + p_c * V_next_increment)
+            # All actions at once: (nA, n_u, n_c)
+            V_next_stay = np.einsum('auj,jc->auc', self.P_user_all, V_old)
 
-            V = np.max(Q, axis=0)
+            V_next_increment = np.stack([
+                V_next_stay[a][:, self.next_indices[self.env.action_categories[a]]]
+                for a in range(self.nA)
+            ])  # (nA, n_u, n_c)
+
+            # Rearrange to (n_u, n_c, nA) to match R and P_comp
+            V_next_stay = V_next_stay.transpose(1, 2, 0)    # (n_u, n_c, nA)
+            V_next_increment = V_next_increment.transpose(1, 2, 0)  # (n_u, n_c, nA)
+
+            # Q: (n_u, n_c, nA)
+            Q = R + self.gamma * ((1 - P_comp) * V_next_stay + P_comp * V_next_increment)
+
+            V = np.max(Q, axis=-1)
+
             if np.max(np.abs(V - V_old)) < theta:
                 break
-                
-        return V, np.argmax(Q, axis=0).flatten()
+
+        return V, np.argmax(Q, axis=-1).flatten()
     
-    def policy_evaluation(self, theta=1e-4, max_iterations=1000):
+    def policy_evaluation(self, theta=1e-4, max_iterations=10):
         """
-        Computes the expected discounted reward vector for the start state.
-        Solves: V_pi = R_pi + gamma * P_pi * V_pi
+        Fully vectorized policy evaluation.
+        No loops over states or actions.
         """
-        n_u = self.nS_user
-        n_c = self.nS_count
-        # Initialize V-table for objectives: (n_u, n_c, n_objectives)
-        V_objs = self.V_full.copy()  
+        n_u, n_c = self.nS_user, self.nS_count
 
         R = self.R.reshape(n_u, n_c, self.nA, self.nO)
         P_comp = self.P_comp.reshape(n_u, n_c, self.nA)
-    
-        pi_2d = self.policy_table.reshape(n_u, n_c)
-        
-        # R_pi shape: (n_u, n_c, nO)
-        R_pi = np.zeros((n_u, n_c, self.nO))
-        P_comp_pi = np.zeros((n_u, n_c))
-        
-        for u in range(n_u):
-            for c in range(n_c):
-                a = pi_2d[u, c]
-                R_pi[u, c] = R[u, c, a]
-                P_comp_pi[u, c] = P_comp[u, c, a] # Completion probability
+        pi_2d = self.policy_table.reshape(n_u, n_c)  # (n_u, n_c) - action at each state
 
-        # 2. Iterative Policy Evaluation
+        # Gather per-state quantities using the policy — no u,c loops
+        idx_u = np.arange(n_u)[:, np.newaxis]              # (n_u, 1)
+        idx_c = np.arange(n_c)[np.newaxis, :]              # (1, n_c)
+
+        R_pi = R[idx_u, idx_c, pi_2d]           # (n_u, n_c, nO) - rewards for the action chosen by the policy at each state
+        P_comp_pi = P_comp[idx_u, idx_c, pi_2d]      # (n_u, n_c) - completion probabilities for the action chosen by the policy at each state
+        p_c = P_comp_pi[:, :, np.newaxis]       # (n_u, n_c, 1) - reshape for broadcasting
+
+        V_new = self.V_full.copy()  # warm start with current value function
+
         for _ in range(max_iterations):
-            V_old = V_objs.copy()
-            
-            for a in range(self.nA):
-                # We only update states where this action 'a' is the optimal one
-                mask = (pi_2d == a)
-                if not np.any(mask):
-                    continue
-                
-                P_user_a = self.P_user[:, a, :] # (n_u, n_u)
-                k = self.env.action_categories[a]  # Category of the current action
-                next_indices_k = self.next_indices[k]  # Shape (n_c,)
-                
-                V_next_stay = P_user_a @ V_old 
-                # Values for incrementing count state
-                V_next_increment = V_next_stay[:, next_indices_k]
-                
-                p_c = P_comp_pi[:, :, np.newaxis] # (n_u, n_c, 1)
-                
-                # Bellman Equation for vectors: R + gamma * [ (1-p)V_stay + p*V_inc ]
-                V_objs[mask] = R_pi[mask] + self.gamma * (
-                    (1 - p_c[mask]) * V_next_stay[mask] + 
-                    p_c[mask] * V_next_increment[mask]
-                )
+            V_old = V_new.copy()
 
-            if np.max(np.abs(V_objs - V_old)) < theta:
+            # Compute next-state values for all actions simultaneously
+            V_next_stay, V_next_increment = self.compute_transitions(V_old)
+
+            # Select the values for the action chosen by the policy at each state
+            V_stay_pi = V_next_stay[pi_2d, idx_u, idx_c]         # (n_u, n_c, nO)
+            V_inc_pi  = V_next_increment[pi_2d, idx_u, idx_c]    # (n_u, n_c, nO)
+
+            # Bellman update for all states at once
+            V_new = R_pi + self.gamma * ((1 - p_c) * V_stay_pi + p_c * V_inc_pi)
+
+            if np.max(np.abs(V_new - V_old)) < theta:
                 break
-        
-        return V_objs
+
+        return V_new
     
     def __getstate__(self):
         state = self.__dict__.copy()
