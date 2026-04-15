@@ -14,12 +14,14 @@ class UserSimEnv(gym.Env):
                  challenge_info,
                  challenges_per_cluster,
                  action_categories,
+                 initial_distribution=None,
                  num_states=27, 
                  num_actions=103, 
                  num_objectives=5,  
                  num_clusters=5,
                  max_episode_steps=28, 
-                 MAX_COUNT=4):
+                 MAX_COUNT=4,
+                 seed=42):
         super(UserSimEnv, self).__init__()
         self.nA = num_actions
         self.nO = num_objectives
@@ -29,6 +31,8 @@ class UserSimEnv(gym.Env):
         self.num_clusters = num_clusters
         self.action_space = gym.spaces.Discrete(self.nA)
         self.MAX_COUNT = MAX_COUNT
+        self.initial_distribution = initial_distribution
+        self.rng = np.random.default_rng(seed)
 
         # Observation space is a vector of 7 features: [tiredness, time, motivation] + [count_AC, count_DS, count_PS, count_SS]
         highs = np.array([2, 2, 2] + [MAX_COUNT]*num_clusters)
@@ -37,9 +41,8 @@ class UserSimEnv(gym.Env):
         self.reward_dim = self.nO
 
         # State variables
-        self.tiredness = -1
-        self.time = -1
-        self.motivation = -1
+        init_user_state = self.rng.choice(self.nS_user, p=initial_distribution) if initial_distribution is not None else 0
+        self.tiredness, self.time, self.motivation = utils.idx_to_state(init_user_state, num_feats=3, num_counts=0, num_vals=3, max_count=0)
         self.counts = [0] * num_clusters  # count for each cluster
 
         # MOMDP components
@@ -61,6 +64,7 @@ class UserSimEnv(gym.Env):
         self.completed_mask = []  # list of whether each suggested challenge was completed
         self.num_completed = 0
         self.t = 0
+
 
     def _get_obs(self):
         state_tuple = (self.tiredness, self.time, self.motivation, *self._get_count_state())
@@ -108,7 +112,7 @@ class UserSimEnv(gym.Env):
             next_state_probs = np.ones(self.nS_user) / self.nS_user  # Uniform distribution
 
         # Sample the next state based on the transition probabilities
-        next_state = np.random.choice(len(next_state_probs), p=next_state_probs)
+        next_state = self.rng.choice(len(next_state_probs), p=next_state_probs)
         return next_state
     
     def get_transition_prob(self, state, action, next_state):
@@ -128,9 +132,8 @@ class UserSimEnv(gym.Env):
         super().reset(seed=seed)
         # Randomly initialize the user's state
         # TODO: use initial state distribution
-        self.tiredness = self.np_random.integers(0, 3)
-        self.time = self.np_random.integers(0, 3)
-        self.motivation = self.np_random.integers(0, 3)
+        init_user_state = self.rng.choice(self.nS_user, p=self.initial_distribution) if self.initial_distribution is not None else 0
+        self.tiredness, self.time, self.motivation = utils.idx_to_state(init_user_state, num_feats=3, num_counts=0, num_vals=3, max_count=0)
         self.num_completed = 0
         self.t = 0
         self.counts = [0] * self.num_clusters
@@ -139,7 +142,7 @@ class UserSimEnv(gym.Env):
         self.completed_mask = []
         return self._get_obs(), self._get_info()
     
-    def step(self, action, completion_bias=None):
+    def step(self, action, completion_bias=False):
         self.t += 1
         u, c = self._get_state_index_factored()
 
@@ -147,10 +150,11 @@ class UserSimEnv(gym.Env):
         rewards = self.R[u, c, action]
 
         prob_done = self.P_comp[u, action]
-        if completion_bias is not None:
-            prob_done = np.clip(prob_done + completion_bias, 0, 1)
+        if completion_bias:
+            bias = self.rng.uniform(1.01, 1.3)
+            prob_done = np.clip(prob_done * bias, 0, 1)
 
-        done = 1 if np.random.rand() < prob_done else 0
+        done = 1 if self.rng.random() < prob_done else 0
         self.num_completed += done
 
         # we have a cluster-level policy, so within that cluster we need to pick a specific challenge to present to the user
@@ -160,9 +164,9 @@ class UserSimEnv(gym.Env):
         challenges_in_min_cat = [c for c in challenges_in_cluster if self.challenge_info[c]['category_id'] == min_count_category]
         if challenges_in_min_cat:
             challenges_not_done = [c for c in challenges_in_min_cat if c not in self.suggested_challenges]
-            chosen_challenge = np.random.choice(challenges_not_done) if challenges_not_done else np.random.choice(challenges_in_min_cat)
+            chosen_challenge = self.rng.choice(challenges_not_done) if challenges_not_done else self.rng.choice(challenges_in_min_cat)
         else:
-            chosen_challenge = np.random.choice(challenges_in_cluster)
+            chosen_challenge = self.rng.choice(challenges_in_cluster)
         self.suggested_challenges.append(chosen_challenge)
         self.completed_mask.append(done)
         chosen_category = self.challenge_info[chosen_challenge]['category_id']

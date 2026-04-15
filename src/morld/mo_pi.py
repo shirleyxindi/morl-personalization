@@ -49,7 +49,6 @@ class MOPolicyIteration(MOPolicy):
     def set_weights(self, weights: np.ndarray, max_eval_iters=10):
         self.weights = weights
         self.train(max_eval_iters=max_eval_iters)
-        print(f"Updated weights to {weights}, re-computed policy.")
 
     def compute_next_state_values(self, V_full):
         """
@@ -159,15 +158,15 @@ class MOPolicyIteration(MOPolicy):
         self.policy_table = new_pi.flatten()
         return policy_stable
 
-
-    def policy_iteration(self, max_iterations=100, max_eval_iters=10, theta=1e-4):
+    def policy_iteration(self, max_iterations=100, max_eval_iters=10, theta=1e-4, verbose=False):
         for i in range(max_iterations):
             old_V = self.V_full.copy()
             self.V_full = self.policy_evaluation(max_iterations=max_eval_iters)  # Fewer iterations for faster convergence
             stable = self.policy_improvement()
             # stable = np.max(np.abs(old_V - self.V_full)) < theta
             if stable:
-                print(f"Policy converged after {i + 1} iterations.")
+                if verbose:
+                    print(f"Policy converged after {i + 1} iterations.")
                 break
         if self.scalarization == 'chebyshev' and self.ref_point is not None:
             self.V_scalarized = np.max(self.weights * np.abs(self.V_full - self.ref_point), axis=-1)
@@ -175,10 +174,10 @@ class MOPolicyIteration(MOPolicy):
             self.V_scalarized = self.V_full @ self.weights
         self.expected_return = self.V_full[0, 0]
 
-
-    def train(self, max_iterations=100, max_eval_iters=10, theta=1e-4):
-        print("Running policy iteration with weights:", self.weights)
-        self.policy_iteration(max_iterations=max_iterations, max_eval_iters=max_eval_iters, theta=theta)
+    def train(self, max_iterations=100, max_eval_iters=10, theta=1e-4, verbose=False):
+        if verbose:
+            print("Running policy iteration with weights:", self.weights)
+        self.policy_iteration(max_iterations=max_iterations, max_eval_iters=max_eval_iters, theta=theta, verbose=verbose)
 
     def evaluate(self, max_eval_iters=1000):
         self.V_full = self.policy_evaluation(max_iterations=max_eval_iters)

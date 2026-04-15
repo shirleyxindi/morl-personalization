@@ -40,6 +40,10 @@ def compute_completion_probabilities_clustered(df, cluster_col, num_states, num_
                 completion_probs_array[:, a] = cluster_probs[:, cluster_idx]
 
         return completion_probs_array
+    
+def compute_completion_probabilities_action_only(df, nA, action_col):
+    baseline_completion = df['completed'].mean()
+    return df.groupby(action_col)['completed'].mean().reindex(range(nA), fill_value=baseline_completion).values
 
 def compute_rewards_clustered(df, completion_probs, clusters, nU, nC, nA, nO, action_categories, num_clusters, count_cluster, use_clusters=False):
     # use_clusters determines whether to use cluster-based rewards or action-based rewards,
@@ -86,7 +90,6 @@ def compute_rewards_clustered(df, completion_probs, clusters, nU, nC, nA, nO, ac
 
 def compute_rewards(df, completion_probs, nU, nC, nA, nO, obj_cols, action_col):
     reward_matrix = np.zeros((nU, nC, nA, nO))
-
     for o_idx, reward_col in enumerate(obj_cols):
         if reward_col == 'r_diversity':
             cluster_reward = df.groupby(['c_idx', action_col])[reward_col].mean()
@@ -98,6 +101,15 @@ def compute_rewards(df, completion_probs, nU, nC, nA, nO, obj_cols, action_col):
                 reward_matrix[s, :, a, o_idx] = reward
 
     return reward_matrix
+
+def compute_avg_rewards(df, nA, action_col, obj_cols):
+    rewards_per_action = np.zeros((nA, len(obj_cols)))
+    for o_idx, reward_col in enumerate(obj_cols):
+        action_rewards = df.groupby(action_col)[reward_col].mean()
+        for a in range(nA):
+            if a in action_rewards.index:
+                rewards_per_action[a, o_idx] = action_rewards.loc[a]
+    return rewards_per_action
 
 def compute_transition_probabilities(df, num_states, num_actions, alpha=None):
     alpha = 1 / num_states if alpha is None else alpha
