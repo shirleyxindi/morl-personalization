@@ -1,34 +1,40 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import utils
 from ipywidgets import interact, fixed
 import ipywidgets as widgets
 import pandas as pd
 import seaborn as sns
 
-def simulate(env, num_users, policy=None, policy_name=None, verbose=False, T=28, num_vals=3, max_count=3):
-    data_list = []    
+def build_user_row(user, t, action, obs, obs_next, rewards, info):
+    return {
+            'user': user,
+            't': t,
+            'action': action,
+            'state': obs,
+            'next_state': obs_next,
+            'completed': info['completed'],
+            'counts': obs[3:],
+            'num_completed': info['num_completed'],
+            'counts_per_category': info['counts_per_category'].copy(),
+            'expert_competencies': info['expert_competencies'].copy(),
+            'rewards': rewards
+        }
+
+def simulate(env, num_users, policy=None, policy_name=None, verbose=False, T=28, seed=66, random_within_cluster=False):
+    data_list = [] 
+    random = policy is None
     for user in range(num_users):
+        user_seed = seed + user
         t = 0
-        obs, _ = env.reset()
+        obs, _ = env.reset(seed=user_seed)
         done = False
         while not done and t < T:
-            state_idx = utils.state_to_idx(obs, num_feats=3, num_counts=env.unwrapped.num_clusters, num_vals=num_vals, max_count=max_count)
-            action = policy[state_idx] if policy is not None else env.action_space.sample()
-            obs_next, rewards, terminated, truncated, info = env.step(action)
+            state_idx = env.unwrapped.get_full_state_index(obs)
+            action = policy[state_idx] if not random else env.action_space.sample()
+            obs_next, rewards, terminated, truncated, info = env.unwrapped.step(action, random_within_cluster=random_within_cluster)  # use the more stochastic step function for more realistic simulations
             if verbose:
                 print(f"Action: {action}, Rewards: {rewards}, Info: {info}")
-            user_row = {
-                'user': user,
-                't': t,
-                'action': action,
-                'state': obs,
-                'next_state': obs_next,
-                'counts': obs[3:],
-                'num_completed': info['num_completed'],
-                'counts_per_category': info['counts_per_category'].copy(),
-                'rewards': rewards
-            }
+            user_row = build_user_row(user, t, action, obs, obs_next, rewards, info)
             data_list.append(user_row)
 
             done = terminated or truncated
@@ -38,42 +44,27 @@ def simulate(env, num_users, policy=None, policy_name=None, verbose=False, T=28,
     simulation_results['policy'] = policy_name if policy_name is not None else 'Random'
     return simulation_results
 
-def simulate_multiple_policies(env, num_users, policies, policy_evals, selection='random', T=28, num_vals=3, max_count=3):
+def simulate_multiple_policies(env, num_users, policies, policy_evals, selection='random', T=28, seed=66, random_within_cluster=False):
     data_list = []
     for user in range(num_users):
+        user_seed = seed + user
+        rng = np.random.default_rng(user_seed)
         t = 0
-        obs, _ = env.reset()
+        obs, _ = env.reset(seed=user_seed)
         done = False
         while not done and t < T:
-            state_idx = utils.state_to_idx(obs, num_feats=3, num_counts=env.unwrapped.num_clusters, num_vals=num_vals, max_count=max_count)
+            state_idx = env.unwrapped.get_full_state_index(obs)
             actions = policies[:, state_idx]
-            if selection == 'random':
-                action = np.random.choice(actions)
-                obs_next, rewards, terminated, truncated, info = env.step(action)
-            elif selection == 'user_choice_most_fun':
-                #  policy evals is (num_policies, num_objectives), we pick the action from the policy with highest likability score (objective index 1)
-                policy_idx = np.argmax(policy_evals[:, 1])
-                action = policies[policy_idx, state_idx]
-                obs_next, rewards, terminated, truncated, info = env.unwrapped.step(action, completion_bias=True)
-            elif selection == 'user_choice_least_time':
-                # pick the action from the policy with lowest time required score (objective index 0)
-                policy_idx = np.argmax(policy_evals[:, 0])
-                action = policies[policy_idx, state_idx]
-                obs_next, rewards, terminated, truncated, info = env.unwrapped.step(action, completion_bias=True) 
-            elif selection == 'user_choice_random':
-                action = np.random.choice(actions)
-                obs_next, rewards, terminated, truncated, info = env.unwrapped.step(action, completion_bias=True)
-            user_row = {
-                'user': user,
-                't': t,
-                'action': action,
-                'state': obs,
-                'next_state': obs_next,
-                'counts': obs[3:],
-                'num_completed': info['num_completed'],
-                'counts_per_category': info['counts_per_category'].copy(),
-                'rewards': rewards
-            }
+            completion_bias = True
+            if selection == 'expert_priority':
+                # pick the action from the policy with the highest expert score
+                policy_idx = np.argmax(policy_evals[:, 2])
+                actions = [policies[policy_idx, state_idx]]
+                completion_bias = False
+
+            obs_next, rewards, terminated, truncated, info = env.unwrapped.step_multi_action(actions, user_type=selection, completion_bias=completion_bias)  # use the more stochastic step function for more realistic simulations
+            action = info['action']
+            user_row = build_user_row(user, t, action, obs, obs_next, rewards, info)
             data_list.append(user_row)
 
             done = terminated or truncated

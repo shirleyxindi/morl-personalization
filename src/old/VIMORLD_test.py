@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import ipywidgets as widgets
 from ipywidgets import interact
-import value_iteration
+import src.old.value_iteration as value_iteration
 import utils
 from morld.vi_morld_simple import VIMORLD
 from morld.mo_vi import MOValueIteration

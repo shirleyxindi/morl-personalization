@@ -2,26 +2,28 @@ import numpy as np
 from morl_baselines.common.morl_algorithm import MOPolicy
 import utils
 
-class MOPolicyIteration(MOPolicy):
-    def __init__(self, id, env, weights, V_init=None, gamma=0.7, scalarization='linear', ref_point=None, **kwargs):
-        super().__init__(id)
+class MOPolicyIteration():
+    def __init__(self, P, R, P_comp, weights, V_init=None, gamma=0.7, scalarization='linear', ref_point=None, max_count=2, initial_distribution=None, action_to_cluster=None, **kwargs):
         self.weights = weights
         self.gamma = gamma
         self.scalarization = scalarization
         self.ref_point = ref_point
+        self.action_to_cluster = action_to_cluster
 
-        self.env = env
-        self.nS = self.env.nS
-        self.nS_user = self.env.nS_user
-        self.nS_count = self.env.nS_count
-        self.nA = self.env.nA
-        self.nO = self.env.nO
+        self.nS_user = P.shape[0]
+        self.nS_count = R.shape[1]
+        self.nS = self.nS_user * self.nS_count
+        self.nA = P.shape[1]
+        self.nO = R.shape[-1]
 
-        self.P_user = self.env.P_user  # shape (n_u, nA, n_u)
+        self.num_clusters = len(set(action_to_cluster)) if action_to_cluster is not None else self.nA
+
+        self.P_user = P  # shape (n_u, nA, n_u)
         self.P_user_all = self.P_user.transpose(1, 0, 2)  # reindex to (nA, n_u, n_u) 
-        self.P_comp = self.env.P_comp  # completion probabilities, shape (nU, nA)
-        self.R = self.env.R  # reward function, shape (nU, nC, nA, nO)
-        self.next_indices = self.env.next_indices  
+        self.P_comp = P_comp  # completion probabilities, shape (nU, nA)
+        self.R = R  # reward function, shape (nU, nC, nA, nO)
+        self.next_indices = utils.build_next_indices(self.num_clusters, max_count)  # pre-computed next count state indices for each action cluster and count state, shape (num_clusters, nC)
+        self.initial_distribution = initial_distribution if initial_distribution is not None else np.ones(self.nS_user) / self.nS_user
         
         self.policy_table = np.zeros(self.nS, dtype=np.int8)  # Policy mapping each state to an action
         self.V_scalarized = np.zeros((self.nS_user, self.nS_count))  # Value function for all states, scalarized with current weights
@@ -31,13 +33,13 @@ class MOPolicyIteration(MOPolicy):
         else:
             self.V_full = np.zeros((self.nS_user, self.nS_count, self.nO))  # Full value function for all states and objectives
 
-    def eval(self, obs, w=None):
+    def eval(self, obs):
         """
         MORLD calls this with (obs, weights).
         We use w=None as a default to keep it flexible.
         """
         if isinstance(obs, np.ndarray):
-            state_idx = utils.state_to_idx(obs, num_feats=3, num_counts=self.env.num_clusters, num_vals=3, max_count=self.env.MAX_COUNT)  
+            state_idx = self.env.unwrapped.get_full_state_index(obs)
         else:
             state_idx = obs
             
@@ -61,7 +63,7 @@ class MOPolicyIteration(MOPolicy):
         
         # For the increment case, we need to reindex according to next_indices for each action category
         V_next_increment = np.stack([
-            V_next_stay[a][:, self.next_indices[self.env.action_categories[a]]]
+            V_next_stay[a][:, self.next_indices[self.action_to_cluster[a]]]
             for a in range(self.nA)
         ])
 
@@ -156,13 +158,13 @@ class MOPolicyIteration(MOPolicy):
         new_q = Q_scalar[u_idx, c_idx, new_pi]
         policy_stable = np.all(np.abs(new_q - old_q) < 1e-6)
         self.policy_table = new_pi.flatten()
-        return policy_stable
+        return policy_stable, Q_scalar
 
     def policy_iteration(self, max_iterations=100, max_eval_iters=10, theta=1e-4, verbose=False):
         for i in range(max_iterations):
             old_V = self.V_full.copy()
             self.V_full = self.policy_evaluation(max_iterations=max_eval_iters)  # Fewer iterations for faster convergence
-            stable = self.policy_improvement()
+            stable, Q_scalar = self.policy_improvement()
             # stable = np.max(np.abs(old_V - self.V_full)) < theta
             if stable:
                 if verbose:
@@ -172,12 +174,16 @@ class MOPolicyIteration(MOPolicy):
             self.V_scalarized = np.max(self.weights * np.abs(self.V_full - self.ref_point), axis=-1)
         else:
             self.V_scalarized = self.V_full @ self.weights
-        self.expected_return = self.V_full[0, 0]
+        self.expected_return = self.initial_distribution @ self.V_full[:, 0]
+        return Q_scalar
 
     def train(self, max_iterations=100, max_eval_iters=10, theta=1e-4, verbose=False):
         if verbose:
             print("Running policy iteration with weights:", self.weights)
         self.policy_iteration(max_iterations=max_iterations, max_eval_iters=max_eval_iters, theta=theta, verbose=verbose)
+
+    def get_optimal_Q(self, max_iterations=100, max_eval_iters=10, theta=1e-4):
+        return self.policy_iteration(max_iterations=max_iterations, max_eval_iters=max_eval_iters, theta=theta)
 
     def evaluate(self, max_eval_iters=1000):
         self.V_full = self.policy_evaluation(max_iterations=max_eval_iters)
@@ -185,5 +191,5 @@ class MOPolicyIteration(MOPolicy):
             self.V_scalarized = np.max(self.weights * np.abs(self.V_full - self.ref_point), axis=-1)
         else:
             self.V_scalarized = self.V_full @ self.weights
-        self.expected_return = self.V_full[0, 0]  # TODO: look at initial distribution instead of just (0,0) -> use weighted average of V_full according to initial state distribution?
-    
+
+        self.expected_return = self.initial_distribution @ self.V_full[:, 0]

@@ -8,12 +8,18 @@ and social support), and saves the results to a new CSV file.
 
 import pandas as pd
 
+difficulty_to_score = {
+    "Makkelijk": 0.33,
+    "Gemiddeld": 0.66,
+    "Moeilijk": 1.0
+}
+
 
 
 data_folder = 'C:\\Users\\shirl\\Documents\\Studie\\2025-2026\\Thesis\\personalized-coping-challenges\\data\\'
 
-action_file = 'challenges.csv'
-action_df = pd.read_csv(data_folder + action_file)
+action_file = 'challenges_real.csv'
+action_df = pd.read_csv(data_folder + action_file, delimiter=';')
 
 expert_score_cols = ['score_acceptance', 'score_distraction', 'score_problem_solving', 'score_social_support']
 
@@ -23,7 +29,9 @@ def map_score(action_df, col, min_score=1, max_score=3):
     normalized_scores = scaled_scores / total
     return scaled_scores
 
-for col in expert_score_cols:
-    action_df[col] = map_score(action_df, col, action_df[col].min(), action_df[col].max())
+# for col in expert_score_cols:
+    # action_df[col] = map_score(action_df, col, action_df[col].min(), action_df[col].max())
 
-action_df.to_csv(data_folder + 'normalized_challenges.csv', index=False)
+action_df['expert_score'] = action_df['Moeilijkheidsgraad'].map(difficulty_to_score)
+action_df.head()
+# action_df.to_csv(data_folder + 'normalized_challenges.csv', index=False)
