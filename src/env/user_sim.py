@@ -3,7 +3,6 @@ import gymnasium as gym
 import mo_gymnasium as mo_gym
 import numpy as np
 import utils
-category_mapping = {0: "AC", 1: "DS", 2: "PS", 3: "SS"}
 
 class UserSimEnv(gym.Env):
 
@@ -119,21 +118,21 @@ class UserSimEnv(gym.Env):
     
     def _get_observed_rewards(self, u_idx, c_idx, challenge_id, action, done):
         # R_probs is a dictionary of reward probability matrices for each objective, where each matrix has shape (num_user_states, num_actions, num_reward_values)
-        # Return vector of reward observations difficulty, fun, perceived usefulness, time, expert rating, novelty
+        # Return vector of reward observations difficulty, fun, perceived usefulness, time, expert rating, diversity
         # TODO: add time as minutes 
         
         if self.R_probs is not None:
-            rewards = np.zeros(6)
-            for o_idx, reward_col in enumerate(["time_spent", "likedness", "usefulness", "PAY_next"]):
+            rewards = np.zeros(7)
+            for o_idx, reward_col in enumerate(["time_spent", "likedness", "usefulness", "difficulty", "PAY_next"]):
                 reward_probs = self.R_probs[reward_col]
                 reward_values = np.arange(reward_probs.shape[2])  # Assuming reward values are 0, 1, ..., num_reward_values-1
-                reward_cluster_id = self.challenge_info[challenge_id][reward_col + '_cluster'] if reward_col != 'PAY_next' else action
+                # reward_cluster_id = self.challenge_info[challenge_id][reward_col + '_cluster'] if reward_col != 'PAY_next' else action
                 reward_cluster_id = action
                 probs = reward_probs[u_idx, reward_cluster_id]
                 sampled_reward = self.np_random.choice(reward_values, p=probs)
                 rewards[o_idx] = sampled_reward
             rewards[-2] = self.expert_scores[challenge_id] * done  # expert rating is deterministic given challenge, but only given if challenge is completed
-            rewards[-1] = 1 - (1/(self.max_count+1)) * self.count_state[self.action_categories[challenge_id]]  # novelty reward is deterministic given cluster and count state
+            rewards[-1] = utils.calculate_shannon_diversity(self.counts_per_category)  # diversity across completed challenges
         else:
             rewards = self.R[u_idx, c_idx, action]
 
@@ -159,6 +158,7 @@ class UserSimEnv(gym.Env):
     
     def get_specific_challenge(self, challenges_in_cluster, novelty_level):
         min_count, max_count = min(self.counts_per_category), max(self.counts_per_category)
+
         if novelty_level == 1:
             target_categories = [i for i in range(4) if self.counts_per_category[i] == min_count]  # least done categories
         else:
@@ -166,11 +166,12 @@ class UserSimEnv(gym.Env):
 
         selected_challenges = [c for c in challenges_in_cluster if self.challenge_info[c]['category_id'] in target_categories]
 
-        if not selected_challenges:  # if no challenges in the target categories, fall back to any challenge in the cluster
+        if not selected_challenges or novelty_level is None:  # if no challenges in the target categories or no novelty level specified, fall back to any challenge in the cluster
             selected_challenges = challenges_in_cluster
 
         # Pick a challenge that has not been done before if possible
-        challenges_not_done = [c for c in selected_challenges if c not in self.suggested_challenges]
+        completed_challenges = [c for c, done in zip(self.suggested_challenges, self.completed_mask) if done]
+        challenges_not_done = [c for c in selected_challenges if c not in completed_challenges]
         return self.np_random.choice(challenges_not_done) if challenges_not_done else self.np_random.choice(selected_challenges)
     
 
@@ -191,41 +192,23 @@ class UserSimEnv(gym.Env):
         done = 1 if self.np_random.random() < prob_done else 0
 
         # we have a cluster-level policy, so within that cluster we need to pick a specific challenge to present to the user
-        # we pick the challenge that has lowest count in its coping strategy category, to encourage diversity
-        # TODO: add choice in here, to account for multiple policies and user choice
-        # TODO: how to deal with multiple policies giving the same coping strategy category
+        # TODO: how to deal with multiple policies giving the same coping strategy category ? 
         challenges_in_cluster = self.challenges_per_cluster[cluster_id]
         if not random_within_cluster:
             chosen_challenge = self.get_specific_challenge(challenges_in_cluster, novelty_level)
         else:
-            challenges_not_done = [c for c in challenges_in_cluster if c not in self.suggested_challenges]
+            completed_challenges = [c for c, done in zip(self.suggested_challenges, self.completed_mask) if done]
+            challenges_not_done = [c for c in challenges_in_cluster if c not in completed_challenges]
             chosen_challenge = self.np_random.choice(challenges_not_done) if challenges_not_done else self.np_random.choice(challenges_in_cluster)
-        self.suggested_challenges.append(chosen_challenge)
-        self.completed_mask.append(done)
-        chosen_category = self.challenge_info[chosen_challenge]['category_id']
+        selected_challenge = {
+            'action_idx': action,
+            'challenge_id': chosen_challenge,
+            'category_id': self.challenge_info[chosen_challenge]['category_id']
+        }
         
-        rewards, expert_competencies_build = self._get_observed_rewards(u, c, chosen_challenge, action, done)
-        self.expert_competencies += expert_competencies_build
-
-        # get next user state
-        next_state_idx = self._get_next_user_state(action)
-        self.user_state = self.get_user_state(next_state_idx)
-
-        # update counts 
-        self.counts_per_category[chosen_category] += done
-        self.counts[self.action_categories[action]] += done
-        self.count_state = self._get_count_state(self.counts_per_category)
-        self.num_completed += done
-
-        terminated = False
-        truncated = self.t >= self._max_episode_steps
-
-        obs = self._get_obs()
-        info = self._get_info(done)
-
-        return obs, rewards, terminated, truncated, info
+        return self._finalize_step(selected_challenge, done)
     
-    def step_multi_action(self, actions, user_type='random', completion_bias=False):
+    def step_choice(self, actions, user_type='random', completion_bias=False):
         """
         Simulates a user selecting from a menu of actions based on a specific persona.
         
@@ -259,7 +242,7 @@ class UserSimEnv(gym.Env):
 
         prob_done = selected_challenge['prob_success']
         if completion_bias:
-            prob_done = np.clip(prob_done * self.np_random.uniform(1.01, 1.06), 0, 1)
+            prob_done = np.clip(prob_done + self.np_random.normal(0.04, 0.0132), 0, 1)
             
         done = 1 if self.np_random.random() < prob_done else 0
 
@@ -287,8 +270,9 @@ class UserSimEnv(gym.Env):
         category_id = selected_challenge['category_id']
         
         # Internal Tracking
+        self.counts_per_category[category_id] += done
         self.suggested_challenges.append(challenge_id)
-        self.completed_mask.append(done)
+        self.completed_mask.append(bool(done))
         
         u, c = self._get_state_index_factored()
         rewards, expert_comp_gain = self._get_observed_rewards(
@@ -300,7 +284,6 @@ class UserSimEnv(gym.Env):
         self.user_state = self.get_user_state(next_state_idx)
 
         # Counter Updates (Specific to the category of the challenge and the action type)
-        self.counts_per_category[category_id] += done
         self.counts[self.action_categories[action_taken]] += done
         self.count_state = self._get_count_state(self.counts_per_category)
         self.num_completed += done
@@ -309,3 +292,5 @@ class UserSimEnv(gym.Env):
         truncated = self.t >= self._max_episode_steps
 
         return self._get_obs(), rewards, terminated, truncated, self._get_info(done, action_taken)
+    
+    

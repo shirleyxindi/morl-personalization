@@ -8,7 +8,6 @@ class MOPolicyIteration():
         self.gamma = gamma
         self.scalarization = scalarization
         self.ref_point = ref_point
-        self.action_to_cluster = action_to_cluster
 
         self.nS_user = P.shape[0]
         self.nS_count = R.shape[1]
@@ -16,6 +15,7 @@ class MOPolicyIteration():
         self.nA = P.shape[1]
         self.nO = R.shape[-1]
 
+        self.action_to_cluster = action_to_cluster if action_to_cluster is not None else np.arange(self.nA)
         self.num_clusters = len(set(action_to_cluster)) if action_to_cluster is not None else self.nA
 
         self.P_user = P  # shape (n_u, nA, n_u)
@@ -160,7 +160,7 @@ class MOPolicyIteration():
         self.policy_table = new_pi.flatten()
         return policy_stable, Q_scalar
 
-    def policy_iteration(self, max_iterations=100, max_eval_iters=10, theta=1e-4, verbose=False):
+    def policy_iteration(self, max_iterations=100, max_eval_iters=500, theta=1e-4, verbose=False):
         for i in range(max_iterations):
             old_V = self.V_full.copy()
             self.V_full = self.policy_evaluation(max_iterations=max_eval_iters)  # Fewer iterations for faster convergence
@@ -177,7 +177,7 @@ class MOPolicyIteration():
         self.expected_return = self.initial_distribution @ self.V_full[:, 0]
         return Q_scalar
 
-    def train(self, max_iterations=100, max_eval_iters=10, theta=1e-4, verbose=False):
+    def train(self, max_iterations=100, max_eval_iters=500, theta=1e-4, verbose=False):
         if verbose:
             print("Running policy iteration with weights:", self.weights)
         self.policy_iteration(max_iterations=max_iterations, max_eval_iters=max_eval_iters, theta=theta, verbose=verbose)

@@ -119,42 +119,41 @@ def get_joint_cluster(df, cluster_cols, joint_col='joint_cluster'):
     
     return df, mapping
 
-def create_count_states(df, cluster_col='cluster_all', max_count=2, num_clusters=6):
+def create_count_states(df, count_col='cluster_all', max_count=2):
     df = df.copy()
-    clusters = sorted(df[cluster_col].unique())
-    num_clusters = len(clusters)
+    clusters = sorted(df[count_col].unique())
     
     # cluster_to_idx = {name: i for i, name in enumerate(clusters)}
     cat_cols = []
     for c in clusters:
         col_name = f"cat_{c}"
-        df[col_name] = ((df[cluster_col] == c) & df["completed"]).astype(int)
+        df[col_name] = ((df[count_col] == c) & df["completed"]).astype(int)
         cat_cols.append(col_name)
 
     df[cat_cols] = df.groupby("user_id")[cat_cols].cumsum()
     df["count"] = df[cat_cols].values.tolist()
 
-    df['s_count_next'] = df['count'].apply(lambda x: [min(count - min(x), max_count) for count in x])
-    df['s_count'] = df.groupby('user_id')['s_count_next'].shift(1, fill_value=[0]*len(clusters))
-
     def calculate_reward(row):
-        idx = row[cluster_col]
+        idx = row[count_col]
         current_count = row['s_count'][idx]
         return 1 - (1 / (max_count + 1)) * current_count * row['completed']
     
     def get_novelty_feature(row):
         # 1 if the challenge was from least exercised category for that user
-        idx = row[cluster_col]
-        counts = row['s_count']
+        idx = row[count_col]
+        counts = row['count']
         if counts[idx] == min(counts) or (len(set(counts)) == 1):
             return 1
         else:
             return 0
     
     df['a_novelty'] = df.apply(get_novelty_feature, axis=1)
-    df['r_diversity'] = df.apply(calculate_reward, axis=1)
 
-    df.drop(cat_cols + ['count'], axis=1, inplace=True)
+    df['s_count_next'] = df['count'].apply(lambda x: [min(count - min(x), max_count) for count in x])
+    df['s_count'] = df.groupby('user_id')['s_count_next'].shift(1, fill_value=[0]*len(clusters))
+    df['r_diversity'] = df['a_novelty']
+
+    df.drop(cat_cols, axis=1, inplace=True)
     
     return df
 
@@ -219,19 +218,17 @@ def get_rewards(df, scale=(-0.5, 0.5), reward_cols=['likedness', 'usefulness', '
     # df['r_difficulty'] = scale_rewards(df['difficulty'].values)
     # df['r_likedness'] = scale_rewards(df['likedness'].values)
     # df['r_usefulness'] = scale_rewards(df['usefulness'].values)
-    df['r_good'] = df.apply(lambda row: row['s_current'][2] - row['s_next'][2], axis=1) 
 
-    df['r_difficulty'] = df.apply(lambda row: (row['difficulty'] + 1) / 11 if row['completed'] == 1 else 0, axis=1)
+    df['r_difficulty'] = df.apply(lambda row: (11 - row['difficulty']) / 11 if row['completed'] == 1 else 0, axis=1)
     df['r_likedness'] = df.apply(lambda row: (row['likedness'] + 1) / 11 if row['completed'] == 1 else 0, axis=1)
     df['r_usefulness'] = df.apply(lambda row: (row['usefulness']) / 7 if row['completed'] == 1 else 0, axis=1)
     df['r_return'] = scale_rewards(df['PAY_next'].values)
-    df['r_expert'] = df['expert_score'] * df['completed'] * df['r_return']
+    df['r_expert'] = df['expert_score'] * df['completed'] 
     
     return df
 
 
-
-def process_samples(df, actions_clustered, state_features, num_vals_per_feature, cluster_col='cluster_all', max_count=2, num_clusters=6):
+def process_samples(df, actions_clustered, state_features, num_vals_per_feature, action_col='joint_cluster', cluster_col='cluster_all', max_count=2, verbose=False):
     '''
     Processes dataframe with (s, a, s', r) samples to df with ((u,c), c(a), (u',c'), r) samples
     '''
@@ -254,14 +251,15 @@ def process_samples(df, actions_clustered, state_features, num_vals_per_feature,
 
     df = df.merge(actions_clustered[['challenge_id'] + [cluster_col]], on='challenge_id', how='left')
 
-    df = create_count_states(df, cluster_col='category_id', max_count=max_count, num_clusters=4)
+    df = create_count_states(df, count_col='category_id', max_count=max_count)
 
     df['c_idx'] = df['s_count'].apply(lambda c: utils.count_state_to_idx(tuple(c), max_count))
     df = get_state_indices(df, num_vals_per_feature)
     df = get_rewards(df)
-    df, mapping = get_joint_cluster(df, ['a_novelty', cluster_col], joint_col='joint_cluster')
+    df, mapping = get_joint_cluster(df, ['a_novelty', cluster_col], joint_col=action_col)
     # df = get_time_rewards(df, num_vals_per_feature, time_state_idx=state_features.index('TIME_Q'), time_col='time_spent')
-    print("Number of samples after processing:", len(df))
+    if verbose:
+        print("Number of samples after processing:", len(df))
     
     return df, initial_distribution, mapping
 

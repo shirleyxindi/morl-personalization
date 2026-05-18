@@ -103,6 +103,18 @@ def build_idx_to_count(num_clusters, max_count):
     
     return idx_to_count  # shape (n_c, num_clusters)
 
+def calculate_shannon_diversity(counts):
+    counts = np.array(counts)
+    if counts.sum() == 0: return 0.0
+    
+    ps = counts / counts.sum()
+    # Mask zeros to avoid log(0)
+    ps = ps[ps > 0]
+    h = -np.sum(ps * np.log(ps))
+    
+    # Normalize by log(number of categories)
+    return h / np.log(len(counts))
+
 
 if __name__ == "__main__":
     vals = [2, 3]

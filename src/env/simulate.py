@@ -48,25 +48,25 @@ def simulate_multiple_policies(env, num_users, policies, policy_evals, selection
     data_list = []
     for user in range(num_users):
         user_seed = seed + user
-        rng = np.random.default_rng(user_seed)
         t = 0
         obs, _ = env.reset(seed=user_seed)
         done = False
         while not done and t < T:
             state_idx = env.unwrapped.get_full_state_index(obs)
-            actions = policies[:, state_idx]
-            completion_bias = True
-            if selection == 'expert_priority':
-                # pick the action from the policy with the highest expert score
-                policy_idx = np.argmax(policy_evals[:, 2])
-                actions = [policies[policy_idx, state_idx]]
-                completion_bias = False
+            if selection == 'expert_priority' or (selection == 'combined' and t >= 15):
+                # pick the action from the policy with the highest value for the expert reward and dversity reward
+                policy_idx = np.argmax(policy_evals[:, 2] + policy_evals[:, 3])
+                action = policies[policy_idx, state_idx]
+                obs_next, rewards, terminated, truncated, info = env.unwrapped.step(action, completion_bias=False)
 
-            obs_next, rewards, terminated, truncated, info = env.unwrapped.step_multi_action(actions, user_type=selection, completion_bias=completion_bias)  # use the more stochastic step function for more realistic simulations
+            else:
+                user_type = selection if selection is not 'combined' else 'random'
+                actions = policies[:, state_idx]
+                completion_bias = True
+                obs_next, rewards, terminated, truncated, info = env.unwrapped.step_choice(actions, user_type=user_type, completion_bias=completion_bias)  # use the more stochastic step function for more realistic simulations
             action = info['action']
             user_row = build_user_row(user, t, action, obs, obs_next, rewards, info)
             data_list.append(user_row)
-
             done = terminated or truncated
             obs = obs_next
             t += 1
