@@ -17,13 +17,13 @@ def paired_t_test(diffs):
         effect_size = pm.Deterministic('effect_size', mu / sigma)
 
         # Likelihood
-        obs = pm.StudentT('obs', nu=nu, mu=mu, lam=lam, observed=diffs)
+        obs = pm.StudentT('obs', nu=nu, mu=mu, sigma=sigma, observed=diffs)
         trace = pm.sample(nuts_sampler="numpyro", cores=4, progressbar=False, random_seed=random_seed)
     
     # Analysis
     print(az.summary(trace, var_names=['improvement', 'effect_size'], hdi_prob=0.95, round_to=3))
     
-    # Probability State-Action is better (improvement > 0)
+    # Probability State-Action improves outcome
     prob_better = (trace.posterior['improvement'] > 0).mean().item()
     print(f"P(improvement > 0): {prob_better:.4f}")
 

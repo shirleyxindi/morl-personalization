@@ -78,7 +78,7 @@ class UserSimEnv(gym.Env):
         state_tuple = self.user_state + self._get_count_state(self.counts_per_category)
         return np.array(state_tuple, dtype=int)
     
-    def _get_info(self, done, action_taken=None):
+    def _get_info(self, done, action_taken=None, challenge_id=None):
         return {
             'user_state': self.user_state,
             'counts': self.counts,
@@ -87,7 +87,8 @@ class UserSimEnv(gym.Env):
             'completed_mask': self.completed_mask,
             'completed': done,
             'expert_competencies': self.expert_competencies,
-            'action': action_taken
+            'action': action_taken,
+            'challenge_id': challenge_id
         }
     
     def get_full_state_index(self, obs):
@@ -129,8 +130,9 @@ class UserSimEnv(gym.Env):
                 # reward_cluster_id = self.challenge_info[challenge_id][reward_col + '_cluster'] if reward_col != 'PAY_next' else action
                 reward_cluster_id = action
                 probs = reward_probs[u_idx, reward_cluster_id]
-                sampled_reward = self.np_random.choice(reward_values, p=probs)
-                rewards[o_idx] = sampled_reward
+                sampled_reward = self.np_random.choice(reward_values, p=probs) + 1
+                mask = True if reward_col == "PAY_next" else done  # Only consider the reward if the challenge was completed, except for return willingness
+                rewards[o_idx] = sampled_reward * mask
             rewards[-2] = self.expert_scores[challenge_id] * done  # expert rating is deterministic given challenge, but only given if challenge is completed
             rewards[-1] = utils.calculate_shannon_diversity(self.counts_per_category)  # diversity across completed challenges
         else:
@@ -242,7 +244,7 @@ class UserSimEnv(gym.Env):
 
         prob_done = selected_challenge['prob_success']
         if completion_bias:
-            prob_done = np.clip(prob_done + self.np_random.normal(0.04, 0.0132), 0, 1)
+            prob_done = np.clip(prob_done + self.np_random.normal(0.047, 0.014), 0, 1)
             
         done = 1 if self.np_random.random() < prob_done else 0
 
@@ -291,6 +293,6 @@ class UserSimEnv(gym.Env):
         terminated = False
         truncated = self.t >= self._max_episode_steps
 
-        return self._get_obs(), rewards, terminated, truncated, self._get_info(done, action_taken)
+        return self._get_obs(), rewards, terminated, truncated, self._get_info(done, action_taken, challenge_id)
     
     

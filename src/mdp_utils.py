@@ -100,6 +100,12 @@ def compute_avg_rewards(df, nA, action_col, obj_cols):
                 rewards_per_action[a, o_idx] = action_rewards.loc[a]
     return rewards_per_action
 
+def compute_rewards_global(df, obj_cols):
+    global_rewards = np.zeros(len(obj_cols))
+    for o_idx, reward_col in enumerate(obj_cols):
+        global_rewards[o_idx] = df[reward_col].mean()
+    return global_rewards
+
 def compute_transition_probabilities(df, num_states, num_actions, action_col, alpha=None):
     alpha = 1 / num_states if alpha is None else alpha
 
@@ -188,3 +194,24 @@ def compute_reward_probabilities_global(df, reward_col, reward_values=None):
     reward_values = list(reward_values)
     global_p = global_probs.reindex(reward_values, fill_value=0).values
     return global_p.reshape(len(reward_values))
+
+def get_time_params(df, num_states, num_actions, action_col, reward_col='time_spent'):
+    mean_per_s_a = df.groupby(['s_idx', action_col])[reward_col].mean()
+    std_per_s_a = df.groupby(['s_idx', action_col])[reward_col].std()
+    all_states = range(num_states)
+    all_actions = range(num_actions)
+    index = pd.MultiIndex.from_product([all_states, all_actions], names=['s_idx', action_col])
+    mean_per_s_a = mean_per_s_a.reindex(index, fill_value=0).values.reshape(num_states, num_actions)
+    std_per_s_a = std_per_s_a.reindex(index, fill_value=0).values.reshape(num_states, num_actions)
+    return mean_per_s_a, std_per_s_a
+
+def get_lognormal_params(mean, std):
+    # Convert mean and std to parameters of a log-normal distribution
+    variance = std ** 2
+    sigma = np.sqrt(np.log(1 + variance / mean ** 2))
+    mu = np.log(mean) - (sigma ** 2) / 2
+    return mu, sigma
+
+def sample_time(mean, std):
+    mu, sigma = get_lognormal_params(mean, std)
+    return np.random.lognormal(mu, sigma)

@@ -213,8 +213,8 @@ def get_time_rewards(df, num_vals_per_feature, time_state_idx=1, time_col='time_
 def get_rewards(df, scale=(-0.5, 0.5), reward_cols=['likedness', 'usefulness', 'difficulty']):
     df = df.copy()
     df[reward_cols] = df[reward_cols] + 1
-    df[reward_cols + ['time_spent']] = df[reward_cols + ['time_spent']].fillna(0)
-    df['r_time'] = scale_rewards(df['time_spent'].values, reverse=True) * df['completed']
+    df[reward_cols] = df[reward_cols].fillna(0)
+    # df['r_time'] = scale_rewards(df['time_spent'].values, reverse=True) * df['completed']
     # df['r_difficulty'] = scale_rewards(df['difficulty'].values)
     # df['r_likedness'] = scale_rewards(df['likedness'].values)
     # df['r_usefulness'] = scale_rewards(df['usefulness'].values)
@@ -222,8 +222,8 @@ def get_rewards(df, scale=(-0.5, 0.5), reward_cols=['likedness', 'usefulness', '
     df['r_difficulty'] = df.apply(lambda row: (11 - row['difficulty']) / 11 if row['completed'] == 1 else 0, axis=1)
     df['r_likedness'] = df.apply(lambda row: (row['likedness'] + 1) / 11 if row['completed'] == 1 else 0, axis=1)
     df['r_usefulness'] = df.apply(lambda row: (row['usefulness']) / 7 if row['completed'] == 1 else 0, axis=1)
-    df['r_return'] = scale_rewards(df['PAY_next'].values)
-    df['r_expert'] = df['expert_score'] * df['completed'] 
+    df['r_return'] = df.apply(lambda row: row['PAY_next'] / 7, axis=1)
+    df['r_expert'] = df['completed'] * df['expert_score']
     
     return df
 
