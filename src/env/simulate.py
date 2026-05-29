@@ -77,6 +77,8 @@ def simulate_multiple_policies(env, num_users, policies, policy_evals, selection
 def plot_seaborn(df, measure, save_path=None):    
     policy_order = sorted(df["policy"].unique())
     plt.figure(figsize=(10, 6))
+    sns.set_style("whitegrid")
+    sns.set_context("notebook", font_scale=1.2)
     ax = sns.lineplot(
         data=df,
         x="t",
@@ -151,6 +153,8 @@ def interactive_plot_objective(df, objectives):
 
 def plot_fraction_completed(df, max_count_per_category=4, save_path=None):
     plt.figure(figsize=(10, 6))
+    sns.set_style("whitegrid")
+    sns.set_context("notebook", font_scale=1.2)
 
     for policy_name, policy_df in df.groupby("policy"):
         n_users = policy_df["user"].nunique()
@@ -190,6 +194,8 @@ def plot_fraction_completed_over_time(df):
     total_challenges = df.groupby("policy")["num_completed"].transform("max")  # or pass explicitly
     
     plt.figure(figsize=(10, 6))
+    sns.set_style("whitegrid")
+    sns.set_context("notebook", font_scale=1.2)
 
     all_num_completed = df["num_completed"].values
     total_per_policy = df.groupby("policy")["num_completed"].max()  # use as denominator
@@ -220,6 +226,8 @@ def plot_fraction_completed_over_time(df):
 
 def plot_fraction_of_users_completed(df):
     plt.figure(figsize=(10, 6))
+    sns.set_style("whitegrid")
+    sns.set_context("notebook", font_scale=1.2)
 
     for policy_name, policy_df in df.groupby("policy"):
 
@@ -266,6 +274,8 @@ def apply_post_hoc_dropout(df, threshold=3):
 
 def plot_dropout(df, threshold=3, save_path=None):
     plt.figure(figsize=(10, 6))
+    sns.set_style("whitegrid")
+    sns.set_context("notebook", font_scale=1.2)
 
     for policy_name, policy_df in df.groupby("policy"):
         df_active = apply_post_hoc_dropout(policy_df, threshold=threshold)
@@ -302,7 +312,8 @@ def plot_state_trajectory(df, target_feature="Usefulness Belief", target_idx=2, 
     )
     policy_order = sorted(trend_df["policy"].unique())
     plt.figure(figsize=(10, 6))
-
+    sns.set_style("whitegrid")
+    sns.set_context("notebook", font_scale=1.2)
     sns.lineplot(
         data=trend_df,
         x="t",
