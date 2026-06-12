@@ -22,7 +22,11 @@ class UserSimEnv(gym.Env):
                  num_clusters=6,
                  max_episode_steps=28, 
                  max_count=2,
-                 mapping=None):
+                 mapping=None,
+                 reward_probs_agency=None,
+                 P_comp_agency=None,
+                 P_agency=None,
+                 agency_bias_params=(0.038, 0.013)):
         super(UserSimEnv, self).__init__()
         self.nA = num_actions
         self.nO = num_objectives
@@ -48,7 +52,10 @@ class UserSimEnv(gym.Env):
         self.R = reward_matrix  # reward matrix that gives the reward vector for each full (u, c) state and action 
         self.P_comp = completion_probs  # completion probabilities for each user state and action
         self.R_probs = reward_probs
-
+        self.R_probs_agency = reward_probs_agency if reward_probs_agency is not None else reward_probs  # reward probabilities under agency condition, default to same as user if not provided
+        self.P_agency = P_agency if P_agency is not None else transition_probs  # transition probabilities under agency condition, default to same as user if not provided
+        self.P_comp_agency = P_comp_agency if P_comp_agency is not None else completion_probs  # empirical completion probabilities for each (s,a)-pair, used for completion biasing 
+        self.agency_bias_params = agency_bias_params  # parameters for adding bias to completion probabilities in agency condition (mean, stddev)
         # Additional challenge information
         self.challenge_info = challenge_info  # list of dictionaries: for each challenge, its corresponding clusters, time required, likability, perceived usefulness, expert scores
         self.challenges_per_cluster = challenges_per_cluster  # mapping from cluster index to list of challenge indices
@@ -103,12 +110,12 @@ class UserSimEnv(gym.Env):
     def _get_count_state(self, counts):
         return tuple(min(counts[cat] - min(counts), self.max_count) for cat in range(len(counts)))
 
-    def _get_next_user_state(self, action):
+    def _get_next_user_state(self, action, agency):
         u, _ = self._get_state_index_factored()
         # transition_probs is a transition matrix of shape (num_user_states, num_actions, num_user_states) where num_user_states = 3^3 = 27
         # we differentiate between user state and count state, since we use different transition logic for user state (stochastic) and count state (semi-deterministic)
-        next_state_probs = self.P_user[u, action]
-        
+        next_state_probs = self.P_user[u, action] if not agency else self.P_agency[u, action]
+
         if next_state_probs.sum() == 0:
             # print(f"Warning: No transitions defined for state {curr_state} and action {action}. Defaulting to uniform distribution.")
             next_state_probs = np.ones(self.nS_user) / self.nS_user  # Uniform distribution
@@ -117,15 +124,15 @@ class UserSimEnv(gym.Env):
         next_state = self.np_random.choice(len(next_state_probs), p=next_state_probs)
         return next_state
     
-    def _get_observed_rewards(self, u_idx, c_idx, challenge_id, action, done):
+    def _get_observed_rewards(self, u_idx, c_idx, challenge_id, action, done, agency=False):
         # R_probs is a dictionary of reward probability matrices for each objective, where each matrix has shape (num_user_states, num_actions, num_reward_values)
         # Return vector of reward observations difficulty, fun, perceived usefulness, time, expert rating, diversity
         # TODO: add time as minutes 
         
         if self.R_probs is not None:
-            rewards = np.zeros(7)
-            for o_idx, reward_col in enumerate(["time_spent", "likedness", "usefulness", "difficulty", "PAY_next"]):
-                reward_probs = self.R_probs[reward_col]
+            rewards = np.zeros(5)
+            for o_idx, reward_col in enumerate(["likedness", "usefulness", "PAY_next"]):
+                reward_probs = self.R_probs[reward_col] if not agency else self.R_probs_agency[reward_col]
                 reward_values = np.arange(reward_probs.shape[2])  # Assuming reward values are 0, 1, ..., num_reward_values-1
                 # reward_cluster_id = self.challenge_info[challenge_id][reward_col + '_cluster'] if reward_col != 'PAY_next' else action
                 reward_cluster_id = action
@@ -186,11 +193,6 @@ class UserSimEnv(gym.Env):
         u, c = self._get_state_index_factored()
 
         prob_done = self.P_comp[u, action]
-        # completion bias to simulate user choice
-        if completion_bias:
-            bias = self.np_random.uniform(1.01, 1.3)
-            prob_done = np.clip(prob_done * bias, 0, 1)
-
         done = 1 if self.np_random.random() < prob_done else 0
 
         # we have a cluster-level policy, so within that cluster we need to pick a specific challenge to present to the user
@@ -202,13 +204,14 @@ class UserSimEnv(gym.Env):
             completed_challenges = [c for c, done in zip(self.suggested_challenges, self.completed_mask) if done]
             challenges_not_done = [c for c in challenges_in_cluster if c not in completed_challenges]
             chosen_challenge = self.np_random.choice(challenges_not_done) if challenges_not_done else self.np_random.choice(challenges_in_cluster)
+        
         selected_challenge = {
             'action_idx': action,
             'challenge_id': chosen_challenge,
             'category_id': self.challenge_info[chosen_challenge]['category_id']
         }
         
-        return self._finalize_step(selected_challenge, done)
+        return self._finalize_step(selected_challenge, done, agency=False)
     
     def step_choice(self, actions, user_type='random', completion_bias=False):
         """
@@ -227,28 +230,30 @@ class UserSimEnv(gym.Env):
             chosen_challenge = self.get_specific_challenge(challenges_in_cluster, novelty)
             
             prob_success = self.P_comp[self._get_state_index_factored()[0], action]
+            prob_success_agency = self.P_comp_agency[self._get_state_index_factored()[0], action] if self.P_comp_agency is not None else prob_success
             
             candidates.append({
                 'action_idx': action,
                 'challenge_id': chosen_challenge,
                 'category_id': self.challenge_info[chosen_challenge]['category_id'],
                 'prob_success': prob_success,
-                'novelty': novelty, # Often correlates with 'fun'
-                'likedness': self.challenge_info[chosen_challenge]['likedness'], # Or a custom skill-gain metric
-                'usefulness': self.challenge_info[chosen_challenge]['usefulness'], # Or a custom utility metric
-                'difficulty': self.challenge_info[chosen_challenge]['difficulty'], # Could factor into the decision for balanced users
-                'completion_rate': self.challenge_info[chosen_challenge]['completion_rate'] # Could factor into the decision for balanced users
+                'novelty': novelty, 
+                'likedness': self.challenge_info[chosen_challenge]['likedness'],
+                'usefulness': self.challenge_info[chosen_challenge]['usefulness'],
+                'difficulty': self.challenge_info[chosen_challenge]['difficulty'], 
+                'completion_rate_agency': self.challenge_info[chosen_challenge]['completion_rate_agency'], 
+                'prob_success_agency': prob_success_agency
             })
 
         selected_challenge = self._simulate_user_choice(candidates, user_type)
 
         prob_done = selected_challenge['prob_success']
-        if completion_bias:
-            prob_done = np.clip(prob_done + self.np_random.normal(0.047, 0.014), 0, 1)
+        if completion_bias:  
+            prob_done = np.clip(prob_done + self.np_random.normal(*self.agency_bias_params), 0, 1)
             
         done = 1 if self.np_random.random() < prob_done else 0
 
-        return self._finalize_step(selected_challenge, done)
+        return self._finalize_step(selected_challenge, done, agency=True)
 
     def _simulate_user_choice(self, candidates, user_type):
         """
@@ -264,8 +269,32 @@ class UserSimEnv(gym.Env):
         elif user_type == 'random':
             return self.np_random.choice(candidates)
         
+        # multinomial logit choice model
+        elif user_type == 'most_likely':
+            prob_successes = np.array([c['prob_success_agency'] for c in candidates])
+            return self.np_random.choice(candidates, p=np.exp(prob_successes)/sum(np.exp(prob_successes)))
         
-    def _finalize_step(self, selected_challenge, done):
+        elif user_type == 'most_likely_usefulness':
+            utilities = np.array([c['usefulness'] for c in candidates])
+            return self.np_random.choice(candidates, p=np.exp(utilities)/sum(np.exp(utilities)))
+        
+        elif user_type == 'informed_most_likely':
+            # this user is aware of the best option from expert's perspective, i.e. increases diversity
+            # we simulate if users are informed of this utility
+            deviation_prob = 0.25 # based on deviation from recommendation in the agency condition in our data
+            if np.random.rand() < deviation_prob:
+                non_novelty_candidates = [c for c in candidates if c['novelty'] != 1]
+                prob_successes = np.array([c['prob_success_agency'] for c in non_novelty_candidates])
+                return self.np_random.choice(non_novelty_candidates, p=np.exp(prob_successes)/sum(np.exp(prob_successes)))
+            else:
+                novelty_candidates = [c for c in candidates if c['novelty'] == 1]
+                prob_successes = np.array([c['prob_success_agency'] for c in novelty_candidates])
+                return self.np_random.choice(novelty_candidates, p=np.exp(prob_successes)/sum(np.exp(prob_successes)))
+                
+
+
+        
+    def _finalize_step(self, selected_challenge, done, agency):
         # Unpack for readability
         action_taken = selected_challenge['action_idx']
         challenge_id = selected_challenge['challenge_id']
@@ -278,11 +307,11 @@ class UserSimEnv(gym.Env):
         
         u, c = self._get_state_index_factored()
         rewards, expert_comp_gain = self._get_observed_rewards(
-            u, c, challenge_id, action_taken, done
+            u, c, challenge_id, action_taken, done, agency=agency
         )
         self.expert_competencies += expert_comp_gain
 
-        next_state_idx = self._get_next_user_state(action_taken)
+        next_state_idx = self._get_next_user_state(action_taken, agency=agency)
         self.user_state = self.get_user_state(next_state_idx)
 
         # Counter Updates (Specific to the category of the challenge and the action type)

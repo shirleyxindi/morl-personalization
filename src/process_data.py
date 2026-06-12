@@ -46,7 +46,7 @@ def create_state_representations(df, state_features, target_col='s_current', num
     for feat, bins in zip(state_features, num_vals_list):
         df[feat] = pd.to_numeric(df[feat], errors='coerce')
         col_name = f'{feat}_binned'
-        if bins == 3 and feat == 'TIR':
+        if bins == 3:
             df[col_name] = bin_around_center(df, feat, use_median=True)            
         else:
             df[col_name] = pd.qcut(df[feat], q=int(bins), labels=False, duplicates='drop')
@@ -90,16 +90,6 @@ def cluster_actions(action_data, cluster_vars, num_clusters=5, cluster_col='clus
     kmeans_all = KMeans(n_clusters=num_clusters, random_state=42)
     action_data[cluster_col] = kmeans_all.fit_predict(action_data[cluster_vars].values)
     cluster_models['all'] = kmeans_all
-
-    # categories = action_data['category'].unique()
-    # for i in range(len(categories)):
-    #     category = categories[i]
-    #     category_data = action_data[action_data['category'] == category]
-    #     kmeans = KMeans(n_clusters=2, random_state=42)
-    #     # X_scaled = scaler.fit_transform(category_data[cluster_vars])
-    #     category_data[cluster_col] = kmeans.fit_predict(category_data[cluster_vars])
-    #     action_data.loc[action_data['category'] == category, cluster_col] = (i*2) + category_data[cluster_col]
-    #     print(action_data[action_data['category'] == category][cluster_col].value_counts())
         
     cluster_cols = [f'{col}_cluster' for col in cluster_vars] + [cluster_col]
     return action_data, cluster_models, cluster_cols
@@ -130,7 +120,7 @@ def create_count_states(df, count_col='cluster_all', max_count=2):
         df[col_name] = ((df[count_col] == c) & df["completed"]).astype(int)
         cat_cols.append(col_name)
 
-    df[cat_cols] = df.groupby("user_id")[cat_cols].cumsum()
+    df[cat_cols] = df.groupby("user_id")[cat_cols].cumsum().groupby(df["user_id"]).shift(fill_value=0)
     df["count"] = df[cat_cols].values.tolist()
 
     def calculate_reward(row):
@@ -147,7 +137,7 @@ def create_count_states(df, count_col='cluster_all', max_count=2):
         else:
             return 0
     
-    df['a_novelty'] = df.apply(get_novelty_feature, axis=1)
+    df['a_novelty'] = df.apply(lambda row: get_novelty_feature(row), axis=1)
 
     df['s_count_next'] = df['count'].apply(lambda x: [min(count - min(x), max_count) for count in x])
     df['s_count'] = df.groupby('user_id')['s_count_next'].shift(1, fill_value=[0]*len(clusters))
@@ -212,15 +202,10 @@ def get_time_rewards(df, num_vals_per_feature, time_state_idx=1, time_col='time_
 
 def get_rewards(df, scale=(-0.5, 0.5), reward_cols=['likedness', 'usefulness', 'difficulty']):
     df = df.copy()
-    df[reward_cols] = df[reward_cols] + 1
+    df[['likedness', 'difficulty']] = df[['likedness', 'difficulty']] + 1
     df[reward_cols] = df[reward_cols].fillna(0)
-    # df['r_time'] = scale_rewards(df['time_spent'].values, reverse=True) * df['completed']
-    # df['r_difficulty'] = scale_rewards(df['difficulty'].values)
-    # df['r_likedness'] = scale_rewards(df['likedness'].values)
-    # df['r_usefulness'] = scale_rewards(df['usefulness'].values)
-
-    df['r_difficulty'] = df.apply(lambda row: (11 - row['difficulty']) / 11 if row['completed'] == 1 else 0, axis=1)
-    df['r_likedness'] = df.apply(lambda row: (row['likedness'] + 1) / 11 if row['completed'] == 1 else 0, axis=1)
+    # df['r_difficulty'] = df.apply(lambda row: (11 - row['difficulty']) / 11 if row['completed'] == 1 else 0, axis=1)
+    df['r_likedness'] = df.apply(lambda row: (row['likedness']) / 11 if row['completed'] == 1 else 0, axis=1)
     df['r_usefulness'] = df.apply(lambda row: (row['usefulness']) / 7 if row['completed'] == 1 else 0, axis=1)
     df['r_return'] = df.apply(lambda row: row['PAY_next'] / 7, axis=1)
     df['r_expert'] = df['completed'] * df['expert_score']
@@ -228,7 +213,7 @@ def get_rewards(df, scale=(-0.5, 0.5), reward_cols=['likedness', 'usefulness', '
     return df
 
 
-def process_samples(df, actions_clustered, state_features, num_vals_per_feature, action_col='joint_cluster', cluster_col='cluster_all', max_count=2, verbose=False):
+def process_samples(df, actions_clustered, state_features, num_vals_per_feature, action_col='joint_cluster', cluster_col='cluster_all', max_count=2, verbose=False, agency_conditions=['w3', 'w4']):
     '''
     Processes dataframe with (s, a, s', r) samples to df with ((u,c), c(a), (u',c'), r) samples
     '''
@@ -258,9 +243,14 @@ def process_samples(df, actions_clustered, state_features, num_vals_per_feature,
     df = get_rewards(df)
     df, mapping = get_joint_cluster(df, ['a_novelty', cluster_col], joint_col=action_col)
     # df = get_time_rewards(df, num_vals_per_feature, time_state_idx=state_features.index('TIME_Q'), time_col='time_spent')
+    
+    agency_df = df[df['within_condition'].isin(agency_conditions)]
+    df = df[~df['within_condition'].isin(agency_conditions)].copy()
+    
     if verbose:
         print("Number of samples after processing:", len(df))
-    
-    return df, initial_distribution, mapping
+        print("Number of agency samples:", len(agency_df))
+        
+    return df, agency_df, initial_distribution, mapping
 
 

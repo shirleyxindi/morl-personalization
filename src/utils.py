@@ -115,18 +115,13 @@ def calculate_shannon_diversity(counts):
     # Normalize by log(number of categories)
     return h / np.log(len(counts))
 
-
-if __name__ == "__main__":
-    vals = [2, 3]
-    counts = 4
-    max_c = 3
-
-    state = (1,2,3,3,3,3) # Example state
-    u_idx, c_idx = full_state_to_factored_idx(state, vals, max_c)
-    print(f"User State Index: {u_idx}")
-    print(f"Count State Index: {c_idx}")
-
-    reconstructed = idx_to_user_state(u_idx, vals) + idx_to_count_state(c_idx, counts, max_c)
-    print(f"Original: {state}")
-    print(f"Reconstructed: {reconstructed}")
-    assert state == reconstructed
+def action_idx_to_action(idx):
+    joint_cluster_to_action = {
+        0: ("D", 0),
+        1: ("EU", 0),
+        2: ("EUD", 0),
+        3: ("D", 1),
+        4: ("EU", 1),
+        5: ("EUD", 1),
+    }
+    return joint_cluster_to_action[idx]

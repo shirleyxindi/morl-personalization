@@ -105,12 +105,12 @@ def feature_selection_with_fixed_multiple_weights(df, actions_clustered, state_f
             n_u = np.prod(current_num_vals)
             
             # 2. Process data with the combined feature set
-            temp_df, _, mapping = process_data.process_samples(df, actions_clustered, current_test_set, 
+            temp_df, _, _, mapping = process_data.process_samples(df, actions_clustered, current_test_set, 
                                                          current_num_vals, action_col, cluster_col, max_count)
             
             # Compute MDP components (same for all weight vectors)
-            P_comp = mdp_utils.compute_completion_probabilities(temp_df, n_u, num_act)
-            R = mdp_utils.compute_rewards(temp_df, P_comp, n_u, n_c, num_act, num_objectives, reward_cols, action_col, mapping)
+            P_comp = mdp_utils.compute_completion_probabilities(temp_df, n_u, num_act, action_col, prior='action_only')
+            R = mdp_utils.compute_rewards(temp_df, n_u, n_c, num_act, num_objectives, reward_cols, action_col, mapping)
             P = mdp_utils.compute_transition_probabilities(temp_df, n_u, num_act, action_col)
             
             # 3. Solve MDP for each weight vector and collect statistics
@@ -227,13 +227,9 @@ def bin_selection_manual_combinations(df, actions_clustered, selected_features, 
             'coverage': None,
             'samples_per_state': None,
             'min_samples_per_pair': None,
-            'f_stats_by_weight': [],
             'returns_by_weight': [],
             'p_values_by_weight': [],
-            'f_stats_by_feature': {feat: [] for feat in selected_features},
             'p_values_by_feature': {feat: [] for feat in selected_features},
-            'mean_f_stat': None,
-            'std_f_stat': None,
             'mean_return': None,
             'std_return': None,
             'mean_p_val': None,
@@ -241,7 +237,7 @@ def bin_selection_manual_combinations(df, actions_clustered, selected_features, 
         }
         
         # Process data with this binning
-        temp_df, temp_dist, mapping = process_data.process_samples(
+        temp_df, _, temp_dist, mapping = process_data.process_samples(
             df, actions_clustered, selected_features, 
             current_num_vals, action_col, cluster_col, max_count
         )
@@ -272,16 +268,15 @@ def bin_selection_manual_combinations(df, actions_clustered, selected_features, 
         
         # Compute MDP components (same for all weight samples)
         P_comp = mdp_utils.compute_completion_probabilities(
-            temp_df, n_u, num_act, action_col
+            temp_df, n_u, num_act, action_col, prior='action_only'
         )
         R = mdp_utils.compute_rewards(
-            temp_df, P_comp, n_u, n_c, num_act, num_objectives, 
+            temp_df, n_u, n_c, num_act, num_objectives, 
             reward_cols, action_col, mapping
         )
         P = mdp_utils.compute_transition_probabilities(
             temp_df, n_u, num_act, action_col
         )
-
         
         for weight_idx, weight_vec in enumerate(weights_list):
             # Solve MDP
@@ -294,8 +289,6 @@ def bin_selection_manual_combinations(df, actions_clustered, selected_features, 
             
             combo_results['returns_by_weight'].append(expected_return)
             
-            # Compute F-statistic for each feature
-            feature_f_stats = []
             feature_p_values = []
             
             for feature_idx, feature_name in enumerate(selected_features):
@@ -315,28 +308,18 @@ def bin_selection_manual_combinations(df, actions_clustered, selected_features, 
                 
                 # Compute F-statistic for this feature
                 if len(q_groups) > 1:
-                    f_stat, p_val = stats.f_oneway(*q_groups)
-                    f_stat_value = f_stat if not np.isnan(f_stat) else 0.0
+                    _, p_val = stats.f_oneway(*q_groups)
                     p_val_value = p_val if not np.isnan(p_val) else 1.0
                 else:
-                    f_stat_value = 0.0
                     p_val_value = 1.0
                 
-                feature_f_stats.append(f_stat_value)
-                combo_results['f_stats_by_feature'][feature_name].append(f_stat_value)
                 feature_p_values.append(p_val_value)
                 combo_results['p_values_by_feature'][feature_name].append(p_val_value)
-            
-            # Overall F-statistic and P-value: mean across all features
-            overall_f_stat = np.mean(feature_f_stats)
-            combo_results['f_stats_by_weight'].append(overall_f_stat)
 
             overall_p_val = np.mean(feature_p_values)
             combo_results['p_values_by_weight'].append(overall_p_val)
         
         # Compute summary statistics
-        combo_results['mean_f_stat'] = np.mean(combo_results['f_stats_by_weight'])
-        combo_results['std_f_stat'] = np.std(combo_results['f_stats_by_weight'])
         combo_results['mean_return'] = np.mean(combo_results['returns_by_weight'])
         combo_results['std_return'] = np.std(combo_results['returns_by_weight'])
         combo_results['mean_p_val'] = np.mean(combo_results['p_values_by_weight'])
@@ -344,7 +327,6 @@ def bin_selection_manual_combinations(df, actions_clustered, selected_features, 
              
         # Print summary
         print(f"\nResults:")
-        print(f"  Mean F-stat: {combo_results['mean_f_stat']:.2f} ± {combo_results['std_f_stat']:.2f}")
         print(f"  Mean p-value: {combo_results['mean_p_val']:.2f} ± {combo_results['std_p_val']:.2f}")
         print(f"  Mean return: {combo_results['mean_return']:.4f} ± {combo_results['std_return']:.4f}")
         
@@ -353,7 +335,6 @@ def bin_selection_manual_combinations(df, actions_clustered, selected_features, 
             mean_p = np.mean(p_values)
             std_p = np.std(p_values)
             print(f"  {feature}: {mean_p:.2f} ± {std_p:.2f}")
-        
         
         # Store results
         results['combinations'].append(current_num_vals)
@@ -372,28 +353,12 @@ def bin_selection_manual_combinations(df, actions_clustered, selected_features, 
         combo_result = results['detailed_results'][idx]
         print(f"\n{rank + 1}. {combo_result['binning_dict']}")
         print(f"   P-value: {combo_result['mean_p_val']:.2f} ± {combo_result['std_p_val']:.2f}")
-        print(f"   F-stat: {combo_result['mean_f_stat']:.2f}, "
-              f"Return: {combo_result['mean_return']:.4f}")
+        print(f"   Return: {combo_result['mean_return']:.4f}")
         print(f"   Coverage: {combo_result['coverage']:.2%}, "
               f"Samples/state: {combo_result['samples_per_state']:.1f}"
               f", Min/pair: {combo_result['min_samples_per_pair']}")
         
-    best_idx = sorted_indices[0]
-    best_score = results['detailed_results'][best_idx]['mean_p_val']
-    best_combination = results['detailed_results'][best_idx]['binning_dict']
-    
-    if best_combination is not None:
-        print(f"\n{'='*70}")
-        print("OPTIMAL CONFIGURATION:")
-        print(f"{'='*70}")
-        best_dict = dict(zip(selected_features, best_combination))
-        for feature, n_bins in best_dict.items():
-            print(f"  {feature}: {n_bins} bins")
-        print(f"\nBest P-value: {best_score:.2f}")
-    else:
-        print("\n⚠️ WARNING: No valid configuration found!")
-    
-    return best_combination, results
+    return results
 
 
 

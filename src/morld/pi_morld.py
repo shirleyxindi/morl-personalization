@@ -67,16 +67,21 @@ class PIMORLD():
             self.add_to_pareto_archive(pi_agent)
 
     def add_to_pareto_archive(self, agent):
-        for ind in self.pareto_archive.individuals:
-            if np.array_equal(ind['policy'], agent.policy_table):
-                print("Policy already in archive, skipping addition.")
-                return
+        if self.is_in_pareto_archive(agent):
+            print("Policy already in archive, skipping addition.")
+            return
         individual = {
             'weights': agent.weights.copy(),
             'policy': agent.policy_table.copy(),
             'V': agent.V_full.copy()
         }
         self.pareto_archive.add(individual, agent.expected_return)
+    
+    def is_in_pareto_archive(self, agent):
+        for ind in self.pareto_archive.individuals:
+            if np.array_equal(ind['policy'], agent.policy_table):
+                return True
+        return False
 
     def adapt_weights_random(self, agents_to_adapt, num_iterations=2):
         for i in range(num_iterations):

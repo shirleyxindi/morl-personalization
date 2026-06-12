@@ -21,7 +21,7 @@ def build_user_row(user, t, action, obs, obs_next, rewards, info):
             'rewards': rewards
         }
 
-def simulate(env, num_users, policy=None, policy_name=None, verbose=False, T=28, seed=66, random_within_cluster=False):
+def simulate(env, num_users, policy=None, policy_name=None, verbose=False, T=28, seed=66):
     data_list = [] 
     random = policy is None
     for user in range(num_users):
@@ -32,7 +32,7 @@ def simulate(env, num_users, policy=None, policy_name=None, verbose=False, T=28,
         while not done and t < T:
             state_idx = env.unwrapped.get_full_state_index(obs)
             action = policy[state_idx] if not random else env.action_space.sample()
-            obs_next, rewards, terminated, truncated, info = env.unwrapped.step(action, random_within_cluster=random_within_cluster)  # use the more stochastic step function for more realistic simulations
+            obs_next, rewards, terminated, truncated, info = env.unwrapped.step(action)  # use the more stochastic step function for more realistic simulations
             if verbose:
                 print(f"Action: {action}, Rewards: {rewards}, Info: {info}")
             user_row = build_user_row(user, t, action, obs, obs_next, rewards, info)
@@ -45,40 +45,48 @@ def simulate(env, num_users, policy=None, policy_name=None, verbose=False, T=28,
     simulation_results['policy'] = policy_name if policy_name is not None else 'Random'
     return simulation_results
 
-def simulate_multiple_policies(env, num_users, policies, policy_evals, selection='random', T=28, seed=66, random_within_cluster=False):
+def simulate_multiple_policies(env, num_users, policies, policy_evals, selection='random', T=28, seed=66, switch_threshold=12, fall_back_policy=None, policy_name=None):
     data_list = []
     for user in range(num_users):
         user_seed = seed + user
         t = 0
+        num_completed = 0
         obs, _ = env.reset(seed=user_seed)
         done = False
         while not done and t < T:
             state_idx = env.unwrapped.get_full_state_index(obs)
-            if selection == 'expert_priority' or (selection == 'combined' and t >= 15):
+            if selection == 'expert_priority' or (selection == 'combined' and num_completed >= switch_threshold):
                 # pick the action from the policy with the highest value for the expert-driven rewards
                 policy_idx = np.argmax(policy_evals[:, 2] + policy_evals[:, 3] + policy_evals[:, 4])  # sum of expert-driven rewards
-                action = policies[policy_idx, state_idx]
+                action = fall_back_policy[state_idx] if fall_back_policy is not None else policies[policy_idx, state_idx]
                 obs_next, rewards, terminated, truncated, info = env.unwrapped.step(action, completion_bias=False)
             else:
-                user_type = selection if selection != 'combined' else 'random'
+                user_type = selection if selection != 'combined' else 'most_likely'
                 actions = policies[:, state_idx]
                 completion_bias = True
                 obs_next, rewards, terminated, truncated, info = env.unwrapped.step_choice(actions, user_type=user_type, completion_bias=completion_bias)
             action = info['action']
+            num_completed = info['num_completed']
             user_row = build_user_row(user, t, action, obs, obs_next, rewards, info)
             data_list.append(user_row)
             done = terminated or truncated
             obs = obs_next
             t += 1
     simulation_results = pd.DataFrame(data_list)
-    simulation_results['policy'] = 'Multipolicy ' + selection
+    simulation_results['policy'] = policy_name if policy_name is not None else 'Multipolicy ' + selection
     return simulation_results
+
+def get_line_style(policy_name):
+    if "Random" in policy_name:
+        return '-'
+    elif "S" in policy_name:
+        return ':'
+    else:
+        return '-.'
 
 def plot_seaborn(df, measure, save_path=None):    
     policy_order = sorted(df["policy"].unique())
     plt.figure(figsize=(10, 6))
-    sns.set_style("whitegrid")
-    sns.set_context("notebook", font_scale=1.2)
     ax = sns.lineplot(
         data=df,
         x="t",
@@ -123,7 +131,7 @@ def plot_simulation(df, measure, obj_idx=None, cumulative=False, ax=None):
         std = np.std(vals, axis=0)
         ci = 1.96 * (std / np.sqrt(n_users))
 
-        line, = ax.plot(mean, label=policy_name, lw=2, linestyle="--" if "Rnd" in policy_name or "Random" in policy_name else "-")
+        line, = ax.plot(mean, label=policy_name, lw=2, linestyle=get_line_style(policy_name))
         ax.fill_between(range(n_steps), mean - ci, mean + ci, color=line.get_color(), alpha=0.15)
 
     ax.legend()
@@ -140,7 +148,7 @@ def interactive_plot_objective(df, objectives):
     @interact
     def ui(
         obj_idx=widgets.Dropdown(options=[(n, i) for i, n in enumerate(objectives)], description="Objective:"),
-        is_cumulative=widgets.Checkbox(value=True, description="Cumulative")
+        is_cumulative=widgets.Checkbox(value=False, description="Cumulative")
     ):
 
         ax = plot_simulation(df=df, measure="rewards", obj_idx=obj_idx, cumulative=is_cumulative)
@@ -153,8 +161,6 @@ def interactive_plot_objective(df, objectives):
 
 def plot_fraction_completed(df, max_count_per_category=4, save_path=None):
     plt.figure(figsize=(10, 6))
-    sns.set_style("whitegrid")
-    sns.set_context("notebook", font_scale=1.2)
 
     for policy_name, policy_df in df.groupby("policy"):
         n_users = policy_df["user"].nunique()
@@ -170,9 +176,7 @@ def plot_fraction_completed(df, max_count_per_category=4, save_path=None):
             "user": np.repeat(np.arange(n_users), n_steps)
         })
 
-        style = '--' if 'Random' in policy_name else '-'
-
-        sns.lineplot(data=plot_df, x="timestep", y="fraction_completed", label=policy_name, linestyle=style, errorbar=('ci', 95), err_style='band')
+        sns.lineplot(data=plot_df, x="timestep", y="fraction_completed", label=policy_name, linestyle=get_line_style(policy_name), errorbar=('ci', 95), err_style='band')
 
     plt.xlabel("Timestep")
     plt.ylabel(f"Average fraction of completing {max_count_per_category} challenges per category")
@@ -194,8 +198,6 @@ def plot_fraction_completed_over_time(df):
     total_challenges = df.groupby("policy")["num_completed"].transform("max")  # or pass explicitly
     
     plt.figure(figsize=(10, 6))
-    sns.set_style("whitegrid")
-    sns.set_context("notebook", font_scale=1.2)
 
     all_num_completed = df["num_completed"].values
     total_per_policy = df.groupby("policy")["num_completed"].max()  # use as denominator
@@ -206,13 +208,12 @@ def plot_fraction_completed_over_time(df):
         plot_df = group[["t", "num_completed"]].copy()
         plot_df["fraction_completed"] = plot_df["num_completed"] / total
 
-        style = '--' if 'Random' in policy_name else '-'
         sns.lineplot(
             data=plot_df,
             x="t",
             y="fraction_completed",
             label=policy_name,
-            linestyle=style,
+            linestyle=get_line_style(policy_name),
             errorbar=('ci', 95),
             err_style='band'
         )
@@ -226,8 +227,6 @@ def plot_fraction_completed_over_time(df):
 
 def plot_fraction_of_users_completed(df):
     plt.figure(figsize=(10, 6))
-    sns.set_style("whitegrid")
-    sns.set_context("notebook", font_scale=1.2)
 
     for policy_name, policy_df in df.groupby("policy"):
 
@@ -235,9 +234,7 @@ def plot_fraction_of_users_completed(df):
 
         fraction_completed = completed.groupby("t")["completed"].mean().reset_index()
 
-        style = "--" if "Random" in policy_name else "-"
-
-        sns.lineplot(data=fraction_completed, x="t", y="completed", label=policy_name, linestyle=style)
+        sns.lineplot(data=fraction_completed, x="t", y="completed", label=policy_name, linestyle=get_line_style(policy_name))
 
     plt.xlabel("Timestep")
     plt.ylabel("Fraction of users who completed a challenge")
@@ -274,8 +271,6 @@ def apply_post_hoc_dropout(df, threshold=3):
 
 def plot_dropout(df, threshold=3, save_path=None):
     plt.figure(figsize=(10, 6))
-    sns.set_style("whitegrid")
-    sns.set_context("notebook", font_scale=1.2)
 
     for policy_name, policy_df in df.groupby("policy"):
         df_active = apply_post_hoc_dropout(policy_df, threshold=threshold)
@@ -291,7 +286,7 @@ def plot_dropout(df, threshold=3, save_path=None):
             x="t",
             y="survival_rate",
             label=policy_name,
-            linestyle="--" if "Random" in policy_name else "-",
+            linestyle=get_line_style(policy_name),
         )
 
     plt.ylabel("Fraction of Active Users")
@@ -303,7 +298,7 @@ def plot_dropout(df, threshold=3, save_path=None):
         plt.savefig(save_path, bbox_inches='tight')
     plt.show()
 
-def plot_state_trajectory(df, target_feature="Usefulness Belief", target_idx=2, threshold=2, save_path=None):
+def plot_state_trajectory(df, target_feature="Motivation", target_idx=2, threshold=2, save_path=None):
     trend_df = (
         df.assign(high=(np.vstack(df["state"].values)[:, target_idx] >= threshold))
         .groupby(["policy", "t"])["high"]
@@ -312,8 +307,6 @@ def plot_state_trajectory(df, target_feature="Usefulness Belief", target_idx=2, 
     )
     policy_order = sorted(trend_df["policy"].unique())
     plt.figure(figsize=(10, 6))
-    sns.set_style("whitegrid")
-    sns.set_context("notebook", font_scale=1.2)
     sns.lineplot(
         data=trend_df,
         x="t",
@@ -325,10 +318,56 @@ def plot_state_trajectory(df, target_feature="Usefulness Belief", target_idx=2, 
     )
 
     plt.xlabel("Timestep")
-    plt.ylabel("Fraction of Users with High Usefulness Belief")
+    plt.ylabel(f"Fraction of Users with High {target_feature}")
     plt.legend(title="(Meta-)Policy")
     plt.grid(True, alpha=0.5)
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, bbox_inches='tight')
+    plt.show()
+
+
+def plot_batched_dropout(df, threshold=3, batch_size=200, n_batches=5, seed=42, ci=True, save_path=None):
+    fig, ax = plt.subplots(figsize=(10, 6))
+    rng = np.random.default_rng(seed)
+
+    for policy_name, policy_df in df.groupby("policy"):
+        users = rng.permutation(policy_df["user"].unique())
+        users = users[:batch_size * n_batches]
+        batches = np.array_split(users, n_batches)
+
+        records = []
+        for batch in batches:
+            batch_df = policy_df[policy_df["user"].isin(batch)]
+            active_df = apply_post_hoc_dropout(batch_df, threshold=threshold)
+
+            timesteps = sorted(batch_df["t"].unique())
+            survival = (
+                active_df.groupby("t")["user"]
+                .nunique()
+                .reindex(timesteps, fill_value=0)
+                .div(len(batch))
+            )
+            for t, val in survival.items():
+                records.append({"t": t, "survival": val})
+
+        melted = pd.DataFrame(records)
+
+        sns.lineplot(
+            data=melted,
+            x="t",
+            y="survival",
+            label=policy_name,
+            linestyle=get_line_style(policy_name),
+            errorbar=("ci", 95) if ci else None,
+            ax=ax,
+        )
+
+    ax.set_ylabel("Fraction of Active Users")
+    ax.set_xlabel("Timestep")
+    ax.legend(title="(Meta-)Policy")
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    if save_path:
+        fig.savefig(save_path, bbox_inches="tight")
     plt.show()
