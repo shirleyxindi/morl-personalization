@@ -1,26 +1,27 @@
+"""
+Helpers for processing raw interaction data into usable (s, a, s', r) samples for (MO)RL.
+
+Author: Shirley Li
+Date: July 2026
+"""
+
 import pandas as pd
 import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
-import utils
-
-def center_and_scale(df, columns, target_bound=0.5):
-    """
-    Centers the mean at 0 and scales values to fit within [-target_bound, target_bound].
-    """
-    df_new = df.copy()
-    for col in columns:
-        centered = df_new[col] - df_new[col].mean()
-        max_deviation = centered.abs().max()
-        
-        if max_deviation != 0:
-            df_new[col] = (centered / max_deviation) * target_bound
-        else:
-            df_new[col] = 0.0 # Handle case where all values are identical
-            
-    return df_new
+from . import utils as utils
 
 def bin_around_center(df, feature, use_median=True):
+    """Bin a feature into below-center, at-center, and above-center levels.
+
+    Args:
+        df: Input DataFrame.
+        feature: Feature column to bin.
+        use_median: If True, use the median as the center; otherwise use the mean.
+
+    Returns:
+        Numpy array of bin labels in {0, 1, 2}.
+    """
     center = df[feature].median() if use_median else df[feature].mean()
     conditions = [
         (df[feature] < center),  # Below -> 0
@@ -31,6 +32,18 @@ def bin_around_center(df, feature, use_median=True):
     return np.select(conditions, choices)
 
 def create_state_representations(df, state_features, target_col='s_current', num_vals_per_feature=3, user_col='user_id'):
+    """Bin selected features and create current and next-state columns.
+
+    Args:
+        df: Input DataFrame.
+        state_features: Features to bin.
+        target_col: Column name for the current-state representation.
+        num_vals_per_feature: Number of bins per feature.
+        user_col: Column used to group trajectories.
+
+    Returns:
+        A copy of the DataFrame with `target_col` and `s_next` columns.
+    """
     df = df.copy()
     
     # Handle different num_bins formats
@@ -60,31 +73,23 @@ def create_state_representations(df, state_features, target_col='s_current', num
     
     return df
 
-def scale_rewards(values, new_min=0, new_max=1, reverse=False):
-    old_min = np.min(values)
-    old_max = np.max(values)
-    
-    if old_max == old_min:
-        return np.full_like(values, new_min)  # Avoid division by zero, set all to new_min
-    
-    if not reverse:
-        scaled = (values - old_min) / (old_max - old_min) * (new_max - new_min) + new_min
-    else:
-        scaled = (old_max - values) / (old_max - old_min) * (new_max - new_min) + new_min
-    return scaled
-
 def cluster_actions(action_data, cluster_vars, num_clusters=5, cluster_col='cluster_all'):
+    """Cluster actions on individual variables and jointly across all variables.
+
+    Args:
+        action_data: DataFrame with action features.
+        cluster_vars: Columns used for clustering.
+        num_clusters: Number of clusters to fit.
+        cluster_col: Column name for the joint clustering result.
+
+    Returns:
+        Tuple of (clustered DataFrame, fitted models, cluster column names).
+    """
     action_data = action_data.copy()
     cluster_models = {}
 
     scaler = StandardScaler()
     action_data[cluster_vars] = scaler.fit_transform(action_data[cluster_vars])
-
-    # Cluster per variable
-    for col in cluster_vars + ['time_spent']:
-        kmeans = KMeans(n_clusters=num_clusters, random_state=42)
-        action_data[f'{col}_cluster'] = kmeans.fit_predict(action_data[[col]].values)
-        cluster_models[col] = kmeans
 
     # Cluster on all variables together
     kmeans_all = KMeans(n_clusters=num_clusters, random_state=42)
@@ -95,6 +100,16 @@ def cluster_actions(action_data, cluster_vars, num_clusters=5, cluster_col='clus
     return action_data, cluster_models, cluster_cols
 
 def get_joint_cluster(df, cluster_cols, joint_col='joint_cluster'):
+    """Create a joint categorical action index from multiple cluster columns.
+
+    Args:
+        df: Input DataFrame.
+        cluster_cols: Columns combined into the joint cluster.
+        joint_col: Output column name for the joint cluster index.
+
+    Returns:
+        Tuple of (updated DataFrame, mapping table).
+    """
     df = df.copy()
     
     grouped = df.groupby(cluster_cols, sort=True)
@@ -109,7 +124,16 @@ def get_joint_cluster(df, cluster_cols, joint_col='joint_cluster'):
     
     return df, mapping
 
-def create_count_states(df, count_col='cluster_all', max_count=2):
+def create_count_states(df, count_col='cluster_all'):
+    """Track cumulative category counts and derive diversity indicators.
+
+    Args:
+        df: Input DataFrame with `user_id`, `completed`, and category labels.
+        count_col: Column used to identify categories.
+
+    Returns:
+        A copy of the DataFrame with count and diversity features added.
+    """
     df = df.copy()
     clusters = sorted(df[count_col].unique())
     
@@ -122,11 +146,6 @@ def create_count_states(df, count_col='cluster_all', max_count=2):
 
     df[cat_cols] = df.groupby("user_id")[cat_cols].cumsum().groupby(df["user_id"]).shift(fill_value=0)
     df["count"] = df[cat_cols].values.tolist()
-
-    def calculate_reward(row):
-        idx = row[count_col]
-        current_count = row['s_count'][idx]
-        return 1 - (1 / (max_count + 1)) * current_count * row['completed']
     
     def get_novelty_feature(row):
         # 1 if the challenge was from least exercised category for that user
@@ -138,94 +157,74 @@ def create_count_states(df, count_col='cluster_all', max_count=2):
             return 0
     
     df['a_novelty'] = df.apply(lambda row: get_novelty_feature(row), axis=1)
-
-    df['s_count_next'] = df['count'].apply(lambda x: [min(count - min(x), max_count) for count in x])
-    df['s_count'] = df.groupby('user_id')['s_count_next'].shift(1, fill_value=[0]*len(clusters))
     df['r_diversity'] = df['a_novelty']
 
     df.drop(cat_cols, axis=1, inplace=True)
     
     return df
 
-def get_state_indices(df, num_vals_per_feature):
+def get_rewards(df, reward_cols=['likedness', 'usefulness', 'difficulty']):
+    """Create the reward columns used by the MDP pipeline.
+
+    Args:
+        df: Input DataFrame.
+        reward_cols: Reward columns expected in the input.
+
+    Returns:
+        A copy of the DataFrame with reward features added.
     """
-    Maps state tuples to a unique integer index (MDP state ID).
-    Equivalent to utils.user_state_to_idx.
-    """
-    df = df.copy()
-    df['s_idx'] = df['s_current'].apply(lambda s: utils.user_state_to_idx(tuple(s), num_vals_per_feature))
-    df['sp_idx'] = df['s_next'].apply(lambda sp: utils.user_state_to_idx(tuple(sp), num_vals_per_feature))
-    return df
-
-def get_time_rewards(df, num_vals_per_feature, time_state_idx=1, time_col='time_spent'):
-    df = df.copy()
-    completed_times = df[df['completed'] == 1][time_col]
-    num_bins = num_vals_per_feature[time_state_idx]
-    
-    # 1. Create bins and calculate the mean of each bin
-    # 'pd.qcut' creates bins with an equal number of samples
-    df_temp = pd.DataFrame({time_col: completed_times})
-    df_temp['bin'] = pd.qcut(df_temp[time_col], q=num_bins, labels=False)
-    
-    # Get the mean time for each bin (this is your 'gold standard' for each state)
-    bin_means = df_temp.groupby('bin')[time_col].mean().to_dict()
-    # round up
-    bin_means = {k: np.ceil(v) for k, v in bin_means.items()}
-    
-    print("Reference Means per Time Bin:")
-    for b, m in bin_means.items():
-        print(f"Bin {b} Mean: {m:.4f} minutes")
-    percentiles = np.linspace(0, 100, num_bins + 1)[1:]
-    time_tolerances = [np.percentile(completed_times, p) for p in percentiles]
-    print("Time rating percentiles:")
-    for p, val in zip(percentiles, time_tolerances):
-        print(f"{p}th percentile: {val:.4f}")
-
-    def get_time_reward(obs_time, time_state, time_tolerances):
-        overtime = max(0, obs_time - time_tolerances[time_state])
-        return max(0, 1 - overtime / time_tolerances[time_state])
-    
-    def calculate_reward(obs_time, time_state, bin_means):
-        # Retrieve the average time for this specific state
-        target_time = bin_means.get(time_state, np.mean(list(bin_means.values())))
-        
-        # Calculate deviation: (Target - Observed) / Target
-        # Positive if faster than mean, negative if slower
-        deviation = (target_time - obs_time) / target_time
-        
-        # Scale and clip to [-0.5, 0.5]
-        # We clip at -1.0 before multiplying by 0.5 so the worst penalty is -0.5
-        return np.clip(deviation, -1.0, 1.0) * 0.5
-
-    df['r_time'] = df.apply(lambda row: get_time_reward(row[time_col], row['s_current'][time_state_idx], bin_means), axis=1)
-    return df
-
-def get_rewards(df, scale=(-0.5, 0.5), reward_cols=['likedness', 'usefulness', 'difficulty']):
     df = df.copy()
     df[['likedness', 'difficulty']] = df[['likedness', 'difficulty']] + 1
     df[reward_cols] = df[reward_cols].fillna(0)
-    # df['r_difficulty'] = df.apply(lambda row: (11 - row['difficulty']) / 11 if row['completed'] == 1 else 0, axis=1)
     df['r_likedness'] = df.apply(lambda row: (row['likedness']) / 11 if row['completed'] == 1 else 0, axis=1)
     df['r_usefulness'] = df.apply(lambda row: (row['usefulness']) / 7 if row['completed'] == 1 else 0, axis=1)
     df['r_return'] = df.apply(lambda row: row['PAY_next'] / 7, axis=1)
-    df['r_expert'] = df['completed'] * df['expert_score']
+    df['r_adherence'] = df['completed'] 
     
     return df
 
+def get_deviation_prob(df, agency_conditions=['w3', 'w4']):
+    """Estimate deviation probability in agency conditions.
 
-def process_samples(df, actions_clustered, state_features, num_vals_per_feature, action_col='joint_cluster', cluster_col='cluster_all', max_count=2, verbose=False, agency_conditions=['w3', 'w4']):
-    '''
-    Processes dataframe with (s, a, s', r) samples to df with ((u,c), c(a), (u',c'), r) samples
-    '''
+    Args:
+        df: Input DataFrame with `within_condition`, `challenge_id`, and `recommended_challenge_id`.
+        agency_conditions: Condition labels considered agency settings.
+
+    Returns:
+        Mean deviation rate among completed agency samples.
+    """
+    df_agency = df[df['within_condition'].isin(agency_conditions)].copy()
+    agency_deviations = df_agency.copy()
+    agency_deviations['deviated'] = agency_deviations['challenge_id'] != agency_deviations['recommended_challenge_id']
+    deviation_prob_among_completed = agency_deviations[agency_deviations['completed'] == 1]['deviated'].mean()
+    return deviation_prob_among_completed
+
+def process_samples(df, actions_clustered, state_features, num_vals_per_feature, action_col='joint_cluster', cluster_col='cluster_all', verbose=False, agency_conditions=['w3', 'w4']):
+    """Convert raw data into usable (s, a, s', r) samples for (MO)RL.
+
+    Args:
+        df: Raw interaction samples.
+        actions_clustered: Action metadata with cluster assignments.
+        state_features: State features.
+        num_vals_per_feature: Number of bins per state feature.
+        action_col: Column used as the joint action index.
+        cluster_col: Column containing the action cluster label.
+        verbose: If True, print processing counts.
+        agency_conditions: Condition labels used to separate agency samples.
+
+    Returns:
+        Tuple of (processed_df, agency_df, initial_distribution, mapping, deviation_prob).
+    """
     df = df.copy()
     df = create_state_representations(df, state_features, num_vals_per_feature=num_vals_per_feature)
     # df.drop(state_features, axis=1, inplace=True)
+    state_to_idx, idx_to_state = utils.build_state_space(num_vals_per_feature)
 
     num_features = len(state_features)
     num_user_states = np.prod(num_vals_per_feature)
 
     initial_states = df.groupby('user_id')['s_current'].first().values.tolist()
-    initial_states_idx = [utils.user_state_to_idx(state, num_vals_per_feature) for state in initial_states]
+    initial_states_idx = [state_to_idx[tuple(state)] for state in initial_states]
     initial_distribution = np.zeros(num_user_states)
     for idx in initial_states_idx:
         initial_distribution[idx] += 1
@@ -236,10 +235,10 @@ def process_samples(df, actions_clustered, state_features, num_vals_per_feature,
 
     df = df.merge(actions_clustered[['challenge_id'] + [cluster_col]], on='challenge_id', how='left')
 
-    df = create_count_states(df, count_col='category_id', max_count=max_count)
+    df = create_count_states(df, count_col='category_id')
 
-    df['c_idx'] = df['s_count'].apply(lambda c: utils.count_state_to_idx(tuple(c), max_count))
-    df = get_state_indices(df, num_vals_per_feature)
+    df['s_idx'] = df['s_current'].apply(lambda x: state_to_idx[tuple(x)])
+    df['sp_idx'] = df['s_next'].apply(lambda x: state_to_idx[tuple(x)])
     df = get_rewards(df)
     df, mapping = get_joint_cluster(df, ['a_novelty', cluster_col], joint_col=action_col)
     # df = get_time_rewards(df, num_vals_per_feature, time_state_idx=state_features.index('TIME_Q'), time_col='time_spent')

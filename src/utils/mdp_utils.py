@@ -1,15 +1,27 @@
+"""
+Utilities for estimating (MO)MDP components from processed data.
+
+Author: Shirley Li
+Date: July 2026
+"""
+
 import numpy as np
 import pandas as pd
 
-def compute_return_probabilities(df, rw_col='PAY'):
-    # Compute return probabilities for each state.
-    # The probabilty they would have returned to the app in the current state
-    # Returns array of shape (num_states,) with values in [0,1]
-    df['prob_return'] = (df[rw_col] - 1) / 6.0
-    return df.groupby('s_idx')['prob_return'].mean().values
-
 def compute_completion_probabilities(df, num_states, num_actions, action_col='joint_cluster', alpha=None, prior='global'):
-    # Computes probability of completing action a in state s: P_comp(s,a) = P(completion | s,a) for each state-action pair, with optional Laplace smoothing.
+    """Estimate completion probabilities P(completion | state, action).
+
+    Args:
+        df: Processed DataFrame with `s_idx`, action, and `completed` columns.
+        num_states: Number of discrete states.
+        num_actions: Number of discrete actions.
+        action_col: Action index column name.
+        alpha: Smoothing strength; defaults to 1 when omitted.
+        prior: Prior type, one of `global`, `action_only`, or `none`.
+
+    Returns:
+        Array of shape (num_states, num_actions) with completion probabilities.
+    """
     alpha = 1 if alpha is None else alpha
 
     group = df.groupby(['s_idx', action_col])
@@ -34,28 +46,61 @@ def compute_completion_probabilities(df, num_states, num_actions, action_col='jo
     return completion_probs
 
 def compute_completion_probabilities_action_only(df, nA, action_col):
+    """Estimate completion probabilities per action.
+
+    Args:
+        df: Processed DataFrame with `completed` and action columns.
+        nA: Number of actions.
+        action_col: Action index column name.
+
+    Returns:
+        Array of shape (nA,) with mean completion probabilities per action.
+    """
     baseline_completion = df['completed'].mean()
     return df.groupby(action_col)['completed'].mean().reindex(range(nA), fill_value=baseline_completion).values
 
-def compute_rewards(df, nU, nC, nA, nO, obj_cols, action_col, mapping=None):
-    reward_matrix = np.zeros((nU, nC, nA, nO))
+def compute_rewards(df, nU, nA, nO, obj_cols, action_col, mapping=None):
+    """Build a dense reward tensor indexed by state, action, and objective.
+
+    Args:
+        df: Processed DataFrame with reward columns.
+        nU: Number of user-state combinations.
+        nA: Number of actions.
+        nO: Number of objectives.
+        obj_cols: Reward column names.
+        action_col: Action index column name.
+        mapping: Optional action-to-feature mapping used for diversity reward.
+
+    Returns:
+        Array of shape (nU, nA, nO).
+    """
+    reward_matrix = np.zeros((nU, nA, nO))
     for o_idx, reward_col in enumerate(obj_cols):
-        if reward_col == 'r_diversity':  # diversity reward is deterministic given count state
-            for c in range(nC):
-                for a in range(nA):
-                    if mapping is not None:
-                        reward = mapping.loc[a]['a_novelty']
-                        reward_matrix[:, c, a, o_idx] = reward 
-                    else:
-                        reward_matrix[:, c, a, o_idx] = df[(df[action_col] == a) & (df['c_idx'] == c)][reward_col].mean()
+        if reward_col == 'r_diversity':
+            for a in range(nA):
+                if mapping is not None:
+                    reward_matrix[:, a, o_idx] = mapping.loc[a]['a_novelty']
+                else:
+                    reward_matrix[:, a, o_idx] = df[df[action_col] == a][reward_col].mean()
         else:
             cluster_reward = df.groupby(['s_idx', action_col])[reward_col].mean()
             for (s, a), reward in cluster_reward.items():
-                reward_matrix[s, :, a, o_idx] = reward
+                reward_matrix[s, a, o_idx] = reward
 
     return reward_matrix
 
 def compute_avg_rewards(df, nA, action_col, obj_cols):
+    """Compute the mean reward per action for each objective.
+
+    Args:
+        df: Processed DataFrame with reward columns.
+        nA: Number of actions.
+        action_col: Action index column name.
+        obj_cols: Reward column names.
+
+    Returns:
+        Array of shape (nA, len(obj_cols)) with action-level means.
+    """
     rewards_per_action = np.zeros((nA, len(obj_cols)))
     for o_idx, reward_col in enumerate(obj_cols):
         action_rewards = df.groupby(action_col)[reward_col].mean()
@@ -65,12 +110,34 @@ def compute_avg_rewards(df, nA, action_col, obj_cols):
     return rewards_per_action
 
 def compute_rewards_global(df, obj_cols):
+    """Compute the global mean reward for each objective.
+
+    Args:
+        df: Processed DataFrame with reward columns.
+        obj_cols: Reward column names.
+
+    Returns:
+        Array of shape (len(obj_cols),) with global means.
+    """
     global_rewards = np.zeros(len(obj_cols))
     for o_idx, reward_col in enumerate(obj_cols):
         global_rewards[o_idx] = df[reward_col].mean()
     return global_rewards
 
 def compute_transition_probabilities(df, num_states, num_actions, action_col, alpha=None, prior='global'):
+    """Estimate transition probabilities P(s' | s, a).
+
+    Args:
+        df: Processed DataFrame with state and next-state indices.
+        num_states: Number of discrete states.
+        num_actions: Number of discrete actions.
+        action_col: Action index column name.
+        alpha: Smoothing strength; defaults to 1 when omitted.
+        prior: Prior type, typically `global`.
+
+    Returns:
+        Array of shape (num_states, num_actions, num_states).
+    """
     alpha = 1 if alpha is None else alpha
 
     counts = df.groupby(['s_idx', action_col, 'sp_idx']).size().unstack(fill_value=0)
@@ -95,8 +162,21 @@ def compute_transition_probabilities(df, num_states, num_actions, action_col, al
     # reshape to (num_states, num_actions, num_states)
     return transition_probs.reshape(num_states, num_actions, num_states)
 
-def compute_transition_probabilities_action_only(df, num_actions, action_col, num_states,alpha=None):
-    alpha = 1 / num_states if alpha is None else alpha
+def compute_transition_probabilities_action_only(df, num_actions, action_col, num_states, alpha=None, prior='global'):
+    """Estimate transition probabilities P(s' | a).
+
+    Args:
+        df: Processed DataFrame with next-state indices.
+        num_actions: Number of discrete actions.
+        action_col: Action index column name.
+        num_states: Number of discrete states.
+        alpha: Smoothing strength; defaults to 1 when omitted.
+        prior: Prior type, typically `global`.
+
+    Returns:
+        Array of shape (num_actions, num_states).
+    """
+    alpha = 1 if alpha is None else alpha
 
     counts = df.groupby([action_col, 'sp_idx']).size().unstack(fill_value=0)
 
@@ -108,13 +188,33 @@ def compute_transition_probabilities_action_only(df, num_actions, action_col, nu
     counts = counts.reindex(columns=range(num_states), fill_value=0)
     
     # Apply Laplace smoothing and normalize
-    counts_smoothed = counts + alpha
+    if prior == 'global':
+        prior = df['sp_idx'].value_counts(normalize=True).sort_index().values
+    else:
+        prior = 1  # similar to uniform prior
+
+    counts_smoothed = counts + alpha * prior
     transition_probs = counts_smoothed.div(counts_smoothed.sum(axis=1), axis=0).values
     
     return transition_probs.reshape(num_actions, num_states)
 
     
 def compute_reward_probabilities(df, reward_col, num_states, num_actions, action_col, lam=1, reward_values=None, prior='action_only'):
+    """Estimate categorical reward distributions for each state-action pair.
+
+    Args:
+        df: Processed DataFrame with reward observations.
+        reward_col: Reward column to model.
+        num_states: Number of discrete states.
+        num_actions: Number of discrete actions.
+        action_col: Action index column name.
+        lam: Smoothing strength.
+        reward_values: Optional explicit support values.
+        prior: Prior type, either `action_only` or global.
+
+    Returns:
+        Array of shape (num_states, num_actions, num_reward_values).
+    """
     if reward_col != 'PAY_next':
         df = df[df['completed'] == 1]  # Only consider completed actions for reward probabilities, since rewards are only observed for completed actions
     if reward_values is None:
@@ -156,6 +256,19 @@ def compute_reward_probabilities(df, reward_col, num_states, num_actions, action
     return smoothed
 
 def compute_reward_probabilities_action_only(df, reward_col, num_actions, action_col, lam=1, reward_values=None):
+    """Estimate categorical reward distributions per action.
+
+    Args:
+        df: Processed DataFrame with reward observations.
+        reward_col: Reward column to model.
+        num_actions: Number of discrete actions.
+        action_col: Action index column name.
+        lam: Smoothing strength.
+        reward_values: Optional explicit support values.
+
+    Returns:
+        Array of shape (num_actions, num_reward_values).
+    """
     if reward_col != 'PAY_next':
         df = df[df['completed'] == 1]
 
@@ -181,6 +294,16 @@ def compute_reward_probabilities_action_only(df, reward_col, num_actions, action
     return smoothed
 
 def compute_reward_probabilities_global(df, reward_col, reward_values=None):
+    """Estimate a global categorical reward distribution.
+
+    Args:
+        df: Processed DataFrame with reward observations.
+        reward_col: Reward column to model.
+        reward_values: Optional explicit support values.
+
+    Returns:
+        Array of shape (num_reward_values,).
+    """
     if reward_col != 'PAY_next':
         df = df[df['completed'] == 1]
 
