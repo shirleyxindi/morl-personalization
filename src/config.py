@@ -24,4 +24,4 @@ NUM_TIMESTEPS = 28
 NUM_USERS = 1000
 
 # Agency bias parameters (mean, std) for the normal distribution used to sample the agency bias during simulation
-agency_bias = (0.036, 0.012)
+agency_bias = (0.031, 0.013)
